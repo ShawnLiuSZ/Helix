@@ -1,0 +1,245 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/ShawnLiuSZ/Helix/internal/provider"
+	"github.com/ShawnLiuSZ/Helix/internal/tool"
+)
+
+// SubAgent 子 Agent
+type SubAgent struct {
+	ID       string
+	Name     string
+	Role     string
+	ParentID string
+
+	agent    *Agent
+	status   SubAgentStatus
+	result   string
+	err      error
+	mu       sync.Mutex
+	done     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+}
+
+// SubAgentStatus 子 Agent 状态
+type SubAgentStatus int
+
+const (
+	StatusPending   SubAgentStatus = iota
+	StatusRunning
+	StatusCompleted
+	StatusFailed
+	StatusCancelled
+)
+
+func (s SubAgentStatus) String() string {
+	switch s {
+	case StatusPending:
+		return "pending"
+	case StatusRunning:
+		return "running"
+	case StatusCompleted:
+		return "completed"
+	case StatusFailed:
+		return "failed"
+	case StatusCancelled:
+		return "cancelled"
+	default:
+		return "unknown"
+	}
+}
+
+// SubAgentManager 子 Agent 管理器
+type SubAgentManager struct {
+	mu        sync.RWMutex
+	agents    map[string]*SubAgent
+	idCounter int
+}
+
+// NewSubAgentManager 创建子 Agent 管理器
+func NewSubAgentManager() *SubAgentManager {
+	return &SubAgentManager{
+		agents: make(map[string]*SubAgent),
+	}
+}
+
+// Spawn 创建并启动子 Agent
+func (m *SubAgentManager) Spawn(name, role string, p provider.Provider, registry *tool.Registry) *SubAgent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.idCounter++
+	id := fmt.Sprintf("sub_%d", m.idCounter)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sa := &SubAgent{
+		ID:     id,
+		Name:   name,
+		Role:   role,
+		agent:  New(p, registry),
+		status: StatusPending,
+		done:   make(chan struct{}),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	m.agents[id] = sa
+	return sa
+}
+
+// Get 获取子 Agent
+func (m *SubAgentManager) Get(id string) (*SubAgent, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sa, ok := m.agents[id]
+	return sa, ok
+}
+
+// List 列出所有子 Agent
+func (m *SubAgentManager) List() []*SubAgent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*SubAgent, 0, len(m.agents))
+	for _, sa := range m.agents {
+		result = append(result, sa)
+	}
+	return result
+}
+
+// Cancel 取消子 Agent
+func (m *SubAgentManager) Cancel(id string) error {
+	m.mu.RLock()
+	sa, ok := m.agents[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("sub-agent %q not found", id)
+	}
+
+	sa.cancel()
+	return nil
+}
+
+// CancelAll 取消所有子 Agent
+func (m *SubAgentManager) CancelAll() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, sa := range m.agents {
+		sa.cancel()
+	}
+}
+
+// Run 启动子 Agent 执行任务
+func (sa *SubAgent) Run(task string) {
+	sa.mu.Lock()
+	if sa.status == StatusRunning {
+		sa.mu.Unlock()
+		return
+	}
+	sa.status = StatusRunning
+	sa.mu.Unlock()
+
+	go func() {
+		defer close(sa.done)
+
+		result, err := sa.agent.Run(sa.ctx, task)
+
+		sa.mu.Lock()
+		defer sa.mu.Unlock()
+
+		if err != nil {
+			if sa.ctx.Err() != nil {
+				sa.status = StatusCancelled
+				sa.err = sa.ctx.Err()
+			} else {
+				sa.status = StatusFailed
+				sa.err = err
+			}
+			return
+		}
+
+		sa.status = StatusCompleted
+		sa.result = result
+	}()
+}
+
+// RunParallel 并行运行多个子 Agent
+func (m *SubAgentManager) RunParallel(tasks map[string]string) map[string]string {
+	var wg sync.WaitGroup
+	results := make(map[string]string)
+	var mu sync.Mutex
+
+	for id, task := range tasks {
+		sa, ok := m.Get(id)
+		if !ok {
+			continue
+		}
+
+		wg.Add(1)
+		go func(sa *SubAgent, task string) {
+			defer wg.Done()
+			sa.Run(task)
+			sa.Wait()
+
+			mu.Lock()
+			results[sa.ID] = sa.Result()
+			mu.Unlock()
+		}(sa, task)
+	}
+
+	wg.Wait()
+	return results
+}
+
+// Wait 等待子 Agent 完成
+func (sa *SubAgent) Wait() {
+	<-sa.done
+}
+
+// WaitTimeout 等待子 Agent 完成（带超时）
+func (sa *SubAgent) WaitTimeout(timeout time.Duration) error {
+	select {
+	case <-sa.done:
+		return nil
+	case <-time.After(timeout):
+		sa.cancel()
+		return fmt.Errorf("sub-agent %q timed out after %v", sa.ID, timeout)
+	}
+}
+
+// Status 返回状态
+func (sa *SubAgent) Status() SubAgentStatus {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	return sa.status
+}
+
+// Result 返回结果
+func (sa *SubAgent) Result() string {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	if sa.err != nil {
+		return fmt.Sprintf("error: %v", sa.err)
+	}
+	return sa.result
+}
+
+// Error 返回错误
+func (sa *SubAgent) Error() error {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	return sa.err
+}
+
+// SetMaxSteps 设置最大步数
+func (sa *SubAgent) SetMaxSteps(n int) {
+	sa.agent.SetMaxSteps(n)
+}
