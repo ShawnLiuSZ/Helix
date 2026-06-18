@@ -15,6 +15,7 @@ import (
 	"github.com/ShawnLiuSZ/Helix/internal/config"
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
 	"github.com/ShawnLiuSZ/Helix/internal/provider/deepseek"
+	"github.com/ShawnLiuSZ/Helix/internal/provider/mimo"
 	"github.com/ShawnLiuSZ/Helix/internal/provider/openai"
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 	"github.com/ShawnLiuSZ/Helix/internal/ui"
@@ -204,6 +205,7 @@ func createProvider(provCfg *config.ProviderConfig) (provider.Provider, error) {
 	reg := provider.NewRegistry()
 	reg.Register(&openai.Adapter{})
 	reg.Register(&deepseek.Adapter{})
+	reg.Register(&mimo.Adapter{})
 
 	models := make([]provider.ModelConfigItem, len(provCfg.Models))
 	for i, m := range provCfg.Models {
