@@ -39,8 +39,8 @@ echo "解释这段代码" | ./bin/helix run
 
 ```bash
 helix                              # 启动交互式 TUI（默认）
-helix --provider deepseek          # 指定 Provider
-helix --model deepseek-v4-pro     # 指定模型
+helix --provider deepseek          # 指定 Provider（deepseek/mimo/openai）
+helix --model deepseek-v4-pro     # 指定默认模型
 helix --session <id>               # 恢复历史会话
 helix --env-file custom.env       # 加载自定义 .env
 helix --version                    # 显示版本
