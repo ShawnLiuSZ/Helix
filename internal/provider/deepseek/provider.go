@@ -54,7 +54,7 @@ func (a *Adapter) Create(cfg provider.Config) (provider.Provider, error) {
 		name:   cfg.Name,
 		models: models,
 		caps:   caps,
-		client: &http.Client{Timeout: 120 * time.Second},
+		client: provider.NewRetryableClient(120 * time.Second),
 		cfg:    cfg,
 	}, nil
 }
@@ -74,7 +74,7 @@ type DeepSeekProvider struct {
 	name   string
 	models []provider.ModelInfo
 	caps   provider.Capabilities
-	client *http.Client
+	client *provider.RetryableHTTPClient
 	cfg    provider.Config
 }
 
