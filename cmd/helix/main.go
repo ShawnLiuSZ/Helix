@@ -31,6 +31,7 @@ var (
 	flagProvider = flag.String("provider", "", "Provider name (e.g. deepseek, openai)")
 	flagModel    = flag.String("model", "", "Model ID (e.g. deepseek-v4-flash)")
 	flagConfig   = flag.String("config", "", "Path to config file")
+	flagEnvFile  = flag.String("env-file", "", "Path to .env file to load")
 	flagVersion  = flag.Bool("version", false, "Show version")
 )
 
@@ -38,9 +39,8 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	// 加载 .env 文件（项目 + 全局）
-	cwd, _ := os.Getwd()
-	config.LoadEnvFiles(cwd)
+	// 加载 .env 文件
+	loadEnvFiles()
 
 	args := flag.Args()
 
@@ -292,7 +292,50 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  helix [options] run <task>     Run a single task\n")
 	fmt.Fprintf(os.Stderr, "  helix [options] setup          Run configuration wizard\n")
-	fmt.Fprintf(os.Stderr, "  helix [options]                Interactive REPL\n\n")
+	fmt.Fprintf(os.Stderr, "  helix [options] chat           Interactive TUI\n")
+	fmt.Fprintf(os.Stderr, "  helix [options]                Show help\n\n")
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	flag.PrintDefaults()
+}
+
+// loadEnvFiles 按优先级加载环境变量文件
+func loadEnvFiles() {
+	// 1. 项目目录下的 .env 文件
+	cwd, _ := os.Getwd()
+	config.LoadEnvFiles(cwd)
+
+	// 2. --env-file 指定的文件（最高优先级，最后加载）
+	if *flagEnvFile != "" {
+		config.LoadEnvFile(*flagEnvFile)
+	}
+}
+
+// ExportEnvToSubprocess 将当前环境变量导出到子进程
+// 工具执行（bash 等）时自动继承
+func ExportEnvToSubprocess() []string {
+	relevantKeys := []string{
+		"DEEPSEEK_API_KEY",
+		"MIMO_API_KEY",
+		"OPENAI_API_KEY",
+		"ANTHROPIC_API_KEY",
+		"HELIX_PROVIDER",
+		"HELIX_MODEL",
+		"PATH",
+		"HOME",
+		"USER",
+	}
+
+	env := os.Environ()
+	filtered := make([]string, 0, len(relevantKeys))
+
+	for _, e := range env {
+		for _, key := range relevantKeys {
+			if strings.HasPrefix(e, key+"=") {
+				filtered = append(filtered, e)
+				break
+			}
+		}
+	}
+
+	return filtered
 }

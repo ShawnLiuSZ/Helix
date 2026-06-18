@@ -15,20 +15,22 @@ import (
 func LoadEnvFiles(projectDir string) error {
 	home, err := os.UserHomeDir()
 	if err == nil {
-		// 全局 .env
 		globalPath := filepath.Join(home, ".helix", ".env")
 		_ = loadEnvFile(globalPath)
 	}
 
-	// 项目 .env
 	projectPath := filepath.Join(projectDir, ".env")
 	_ = loadEnvFile(projectPath)
 
-	// 项目 .env.local（优先级最高）
 	localPath := filepath.Join(projectDir, ".env.local")
 	_ = loadEnvFile(localPath)
 
 	return nil
+}
+
+// LoadEnvFile 加载指定路径的 .env 文件
+func LoadEnvFile(path string) error {
+	return loadEnvFile(path)
 }
 
 // loadEnvFile 加载单个 .env 文件（不存在不报错）
