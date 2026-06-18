@@ -39,7 +39,125 @@ func (a *Agent) SetModel(m string) { a.model = m }
 // AddGuard 添加工具执行守卫
 func (a *Agent) AddGuard(g tool.Guard) { a.executor.AddGuard(g) }
 
-// Run 运行 Agent，执行用户任务
+// RunStream 流式运行 Agent，通过 channel 返回文本增量
+func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-chan error) {
+	textCh := make(chan string, 100)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+
+		a.messages = []provider.Message{
+			{Role: "system", Content: a.buildSystemPrompt()},
+			{Role: "user", Content: task},
+		}
+
+		for step := 0; step < a.maxSteps; step++ {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+			}
+
+			streamCh, err := a.provider.Stream(ctx, &provider.ChatRequest{
+				Model:    a.model,
+				Messages: a.messages,
+				Tools:    a.buildToolDefs(),
+			})
+			if err != nil {
+				errCh <- fmt.Errorf("stream error (step %d): %w", step, err)
+				return
+			}
+
+			var fullContent string
+			var toolCalls []provider.ToolCall
+			var toolCallDeltas []provider.ToolCallDelta
+
+			for event := range streamCh {
+				switch event.Type {
+				case provider.EventText:
+					fullContent += event.Content
+					textCh <- event.Content
+				case provider.EventToolCall:
+					if event.ToolCall != nil {
+						toolCallDeltas = append(toolCallDeltas, *event.ToolCall)
+					}
+				case provider.EventError:
+					errCh <- fmt.Errorf("stream error: %s", event.Content)
+					return
+				}
+			}
+
+			// 合并工具调用增量
+			toolCalls = mergeToolCallDeltas(toolCallDeltas)
+
+			// 追加 assistant 消息
+			assistantMsg := provider.Message{Role: "assistant", Content: fullContent}
+			if len(toolCalls) > 0 {
+				for i := range toolCalls {
+					argsJSON, _ := json.Marshal(toolCalls[i].Args)
+					toolCalls[i].Function.Arguments = string(argsJSON)
+					toolCalls[i].Type = "function"
+				}
+				assistantMsg.ToolCalls = toolCalls
+			}
+			a.messages = append(a.messages, assistantMsg)
+
+			// 无工具调用 → 完成
+			if len(toolCalls) == 0 {
+				return
+			}
+
+			// 执行工具
+			toolResults := a.executeTools(ctx, toolCalls)
+			for i, tc := range toolCalls {
+				content := toolResults[i].Content
+				if !toolResults[i].OK() {
+					content = fmt.Sprintf("Error: %s", toolResults[i].Error)
+				}
+				a.messages = append(a.messages, provider.Message{
+					Role:       "tool",
+					Content:    content,
+					ToolCallID: tc.ID,
+				})
+			}
+		}
+
+		errCh <- fmt.Errorf("max steps (%d) reached", a.maxSteps)
+	}()
+
+	return textCh, errCh
+}
+
+// mergeToolCallDeltas 合并流式工具调用增量
+func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
+	byID := make(map[string]*provider.ToolCall)
+	for _, d := range deltas {
+		tc, ok := byID[d.ID]
+		if !ok {
+			tc = &provider.ToolCall{ID: d.ID, Function: provider.ToolCallFunc{Name: d.Name}}
+			byID[d.ID] = tc
+		}
+		if d.Name != "" {
+			tc.Function.Name = d.Name
+		}
+		// 累积 arguments
+		if d.Arguments != "" {
+			tc.Function.Arguments += d.Arguments
+		}
+	}
+
+	var result []provider.ToolCall
+	for _, tc := range byID {
+		if tc.Function.Arguments != "" {
+			json.Unmarshal([]byte(tc.Function.Arguments), &tc.Args)
+		}
+		result = append(result, *tc)
+	}
+	return result
+}
 func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 	a.messages = []provider.Message{
 		{Role: "system", Content: a.buildSystemPrompt()},

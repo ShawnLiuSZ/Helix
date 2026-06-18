@@ -124,6 +124,14 @@ func (a *MultiAgent) Run(ctx context.Context, task string) (string, error) {
 	}
 }
 
+// RunStream 流式执行任务（仅 Build 模式支持）
+func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string, <-chan error) {
+	ag := New(a.provider, a.tools)
+	ag.SetMaxSteps(a.maxSteps)
+	ag.SetModel(a.model)
+	return ag.RunStream(ctx, task)
+}
+
 // runBuild Build 模式：完整工具权限
 func (a *MultiAgent) runBuild(ctx context.Context, task string) (string, error) {
 	ag := New(a.provider, a.tools)

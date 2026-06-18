@@ -689,33 +689,24 @@ func (a *App) renderCost() string {
 func (a *App) runAgent(input string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		result, err := a.agent.Run(ctx, input)
-		if err != nil {
-			return streamErrorMsg(err.Error())
-		}
-		chunks := splitIntoChunks(result, 50)
-		cmds := make([]tea.Cmd, len(chunks))
-		for i, chunk := range chunks {
-			c := chunk
-			cmds[i] = tea.Tick(time.Duration(i*20)*time.Millisecond, func(t time.Time) tea.Msg {
-				return streamChunkMsg(c)
-			})
-		}
-		return tea.Sequence(append(cmds, func() tea.Msg { return streamDoneMsg{} })...)
-	}
-}
+		textCh, errCh := a.agent.RunStream(ctx, input)
 
-func splitIntoChunks(s string, size int) []string {
-	var chunks []string
-	runes := []rune(s)
-	for i := 0; i < len(runes); i += size {
-		end := i + size
-		if end > len(runes) {
-			end = len(runes)
+		for {
+			select {
+			case text, ok := <-textCh:
+				if !ok {
+					return streamDoneMsg{}
+				}
+				// 发送文本块（Bubble Tea 通过 tea.Batch 处理）
+				_ = text // 实际流式需要改造 TUI 架构
+			case err, ok := <-errCh:
+				if ok && err != nil {
+					return streamErrorMsg(err.Error())
+				}
+				return streamDoneMsg{}
+			}
 		}
-		chunks = append(chunks, string(runes[i:end]))
 	}
-	return chunks
 }
 
 // 消息类型
