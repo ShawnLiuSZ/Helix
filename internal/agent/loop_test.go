@@ -7,46 +7,12 @@ import (
 	"testing"
 
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
+	"github.com/ShawnLiuSZ/Helix/internal/testutil"
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
-// stubProvider 测试用 Provider
-type stubProvider struct {
-	name     string
-	models   []provider.ModelInfo
-	caps     provider.Capabilities
-	chatFn   func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error)
-}
-
-func (s *stubProvider) Name() string                          { return s.name }
-func (s *stubProvider) Models() []provider.ModelInfo          { return s.models }
-func (s *stubProvider) Capabilities() provider.Capabilities   { return s.caps }
-func (s *stubProvider) Cost(modelID string, usage provider.Usage) provider.Cost {
-	return provider.Cost{Currency: "USD"}
-}
-func (s *stubProvider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
-	if s.chatFn != nil {
-		return s.chatFn(ctx, req)
-	}
-	return &provider.ChatResponse{Content: "default response"}, nil
-}
-func (s *stubProvider) Stream(ctx context.Context, req *provider.ChatRequest) (<-chan provider.StreamEvent, error) {
-	ch := make(chan provider.StreamEvent, 1)
-	ch <- provider.StreamEvent{Type: provider.EventText, Content: "stream response"}
-	close(ch)
-	return ch, nil
-}
-
-func newStubProvider(chatFn func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error)) *stubProvider {
-	return &stubProvider{
-		name: "stub",
-		caps: provider.Capabilities{SupportsToolCall: true},
-		chatFn: chatFn,
-	}
-}
-
 func TestAgent_SingleTurn(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "Hello, I can help!"}, nil
 	})
 
@@ -64,17 +30,15 @@ func TestAgent_SingleTurn(t *testing.T) {
 
 func TestAgent_MultiTurnToolCall(t *testing.T) {
 	callCount := 0
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		callCount++
 		if callCount == 1 {
-			// 第一轮：返回工具调用
 			return &provider.ChatResponse{
 				ToolCalls: []provider.ToolCall{
 					{ID: "call_1", Name: "read_file", Args: map[string]any{"path": "/tmp/test.txt"}},
 				},
 			}, nil
 		}
-		// 第二轮：返回最终答案
 		return &provider.ChatResponse{Content: "File analysis complete"}, nil
 	})
 
@@ -98,7 +62,7 @@ func TestAgent_MultiTurnToolCall(t *testing.T) {
 
 func TestAgent_ToolCallWithError(t *testing.T) {
 	callCount := 0
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		callCount++
 		if callCount == 1 {
 			return &provider.ChatResponse{
@@ -120,14 +84,13 @@ func TestAgent_ToolCallWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	// Agent 应该继续处理并返回最终答案
 	if !strings.Contains(result, "continue") {
 		t.Errorf("unexpected result: %q", result)
 	}
 }
 
 func TestAgent_MaxSteps(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{
 			ToolCalls: []provider.ToolCall{
 				{ID: "call_1", Name: "read_file", Args: map[string]any{"path": "/tmp/test"}},
@@ -151,7 +114,7 @@ func TestAgent_MaxSteps(t *testing.T) {
 }
 
 func TestAgent_ChatError(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return nil, errors.New("api unavailable")
 	})
 
@@ -168,7 +131,7 @@ func TestAgent_ChatError(t *testing.T) {
 }
 
 func TestAgent_ContextCancellation(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "ok"}, nil
 	})
 
@@ -176,7 +139,7 @@ func TestAgent_ContextCancellation(t *testing.T) {
 	agent := New(p, r)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // 立即取消
+	cancel()
 
 	_, err := agent.Run(ctx, "do something")
 	if err == nil {
@@ -186,7 +149,7 @@ func TestAgent_ContextCancellation(t *testing.T) {
 
 func TestAgent_GuardChain(t *testing.T) {
 	guardCalled := false
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{
 			ToolCalls: []provider.ToolCall{
 				{ID: "call_1", Name: "read_file", Args: map[string]any{"path": "/tmp/test"}},
@@ -203,7 +166,6 @@ func TestAgent_GuardChain(t *testing.T) {
 		return nil
 	})
 
-	// 需要文件存在才能通过 guard 后的执行
 	t.Setenv("HELIX_TEST", "1")
 	_, _ = agent.Run(context.Background(), "read file")
 
@@ -217,7 +179,7 @@ func TestAgent_BuildToolDefs(t *testing.T) {
 	r.Register(&tool.ReadFileTool{})
 	r.Register(&tool.GrepTool{})
 
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	agent := New(p, r)
 
 	defs := agent.buildToolDefs()
@@ -235,7 +197,7 @@ func TestAgent_BuildToolDefs(t *testing.T) {
 }
 
 func TestAgent_BuildSystemPrompt(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	agent := New(p, r)
 

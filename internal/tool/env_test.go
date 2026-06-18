@@ -3,23 +3,15 @@ package tool
 import (
 	"os"
 	"testing"
+
+	"github.com/ShawnLiuSZ/Helix/internal/testutil"
 )
 
-// testEnvProvider 测试用环境变量提供者
-type testEnvProvider struct {
-	env []string
-}
-
-func (p *testEnvProvider) EnvForSubprocess() []string {
-	return p.env
-}
-
 func TestSetEnvProvider(t *testing.T) {
-	// 保存并恢复原始 provider
 	orig := globalEnvProvider
 	defer func() { globalEnvProvider = orig }()
 
-	p := &testEnvProvider{env: []string{"KEY_A=val_a", "KEY_B=val_b"}}
+	p := &testutil.TestEnvProvider{Env: []string{"KEY_A=val_a", "KEY_B=val_b"}}
 	SetEnvProvider(p)
 
 	env := EnvForSubprocess()
@@ -49,7 +41,7 @@ func TestEnvForSubprocess_EmptyEnv(t *testing.T) {
 	orig := globalEnvProvider
 	defer func() { globalEnvProvider = orig }()
 
-	p := &testEnvProvider{env: []string{}}
+	p := &testutil.TestEnvProvider{Env: []string{}}
 	SetEnvProvider(p)
 
 	env := EnvForSubprocess()
@@ -62,9 +54,8 @@ func TestBashTool_InjectsEnv(t *testing.T) {
 	orig := globalEnvProvider
 	defer func() { globalEnvProvider = orig }()
 
-	// 设置测试环境变量
 	t.Setenv("HELIX_TEST_KEY", "test_value")
-	p := &testEnvProvider{env: os.Environ()}
+	p := &testutil.TestEnvProvider{Env: os.Environ()}
 	SetEnvProvider(p)
 
 	tl := &BashTool{}
@@ -83,7 +74,7 @@ func TestGrepTool_InjectsEnv(t *testing.T) {
 	orig := globalEnvProvider
 	defer func() { globalEnvProvider = orig }()
 
-	p := &testEnvProvider{env: os.Environ()}
+	p := &testutil.TestEnvProvider{Env: os.Environ()}
 	SetEnvProvider(p)
 
 	dir := t.TempDir()
@@ -107,7 +98,7 @@ func TestGlobTool_InjectsEnv(t *testing.T) {
 	orig := globalEnvProvider
 	defer func() { globalEnvProvider = orig }()
 
-	p := &testEnvProvider{env: os.Environ()}
+	p := &testutil.TestEnvProvider{Env: os.Environ()}
 	SetEnvProvider(p)
 
 	dir := t.TempDir()
@@ -131,7 +122,7 @@ func TestBashTool_EnvInheritsAPIKeys(t *testing.T) {
 	defer func() { globalEnvProvider = orig }()
 
 	t.Setenv("DEEPSEEK_API_KEY", "sk-test-deepseek-key")
-	p := &testEnvProvider{env: os.Environ()}
+	p := &testutil.TestEnvProvider{Env: os.Environ()}
 	SetEnvProvider(p)
 
 	tl := &BashTool{}

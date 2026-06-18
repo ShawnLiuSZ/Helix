@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
+	"github.com/ShawnLiuSZ/Helix/internal/testutil"
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
@@ -36,7 +37,7 @@ func TestModeFromString(t *testing.T) {
 		{"plan", ModePlan},
 		{"compose", ModeCompose},
 		{"max", ModeMax},
-		{"unknown", ModeBuild}, // 默认 build
+		{"unknown", ModeBuild},
 	}
 
 	for _, tt := range tests {
@@ -48,7 +49,7 @@ func TestModeFromString(t *testing.T) {
 }
 
 func TestMultiAgent_SetMode(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	a := NewMultiAgent(p, r)
 
@@ -59,14 +60,14 @@ func TestMultiAgent_SetMode(t *testing.T) {
 }
 
 func TestMultiAgent_PlanMode(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "Plan: 1. Analyze code\n2. Implement\n3. Test"}, nil
 	})
 
 	r := tool.NewRegistry()
 	r.Register(&tool.ReadFileTool{})
 	r.Register(&tool.GrepTool{})
-	r.Register(&tool.WriteFileTool{}) // Plan 模式不应使用
+	r.Register(&tool.WriteFileTool{})
 
 	a := NewMultiAgent(p, r)
 	a.SetMode(ModePlan)
@@ -81,7 +82,7 @@ func TestMultiAgent_PlanMode(t *testing.T) {
 }
 
 func TestMultiAgent_PlanMode_ReadOnlyTools(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	r.Register(&tool.ReadFileTool{})
 	r.Register(&tool.WriteFileTool{})
@@ -89,7 +90,6 @@ func TestMultiAgent_PlanMode_ReadOnlyTools(t *testing.T) {
 	a := NewMultiAgent(p, r)
 	defs := a.buildReadOnlyToolDefs()
 
-	// 只应包含只读工具
 	if len(defs) != 1 {
 		t.Errorf("readOnly defs count = %d, want 1", len(defs))
 	}
@@ -99,7 +99,7 @@ func TestMultiAgent_PlanMode_ReadOnlyTools(t *testing.T) {
 }
 
 func TestMultiAgent_ComposeMode(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "Feature implemented according to spec"}, nil
 	})
 
@@ -118,7 +118,7 @@ func TestMultiAgent_ComposeMode(t *testing.T) {
 }
 
 func TestMultiAgent_MaxMode(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "best answer from parallel candidates"}, nil
 	})
 
@@ -137,7 +137,7 @@ func TestMultiAgent_MaxMode(t *testing.T) {
 }
 
 func TestMultiAgent_BuildPrompt(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	a := NewMultiAgent(p, r)
 

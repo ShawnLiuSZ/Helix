@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
+	"github.com/ShawnLiuSZ/Helix/internal/testutil"
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
 func TestSubAgentManager_Spawn(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	m := NewSubAgentManager()
 
@@ -27,7 +28,7 @@ func TestSubAgentManager_Spawn(t *testing.T) {
 }
 
 func TestSubAgentManager_Get(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	m := NewSubAgentManager()
 
@@ -47,7 +48,7 @@ func TestSubAgentManager_Get(t *testing.T) {
 }
 
 func TestSubAgentManager_List(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	m := NewSubAgentManager()
 
@@ -61,7 +62,7 @@ func TestSubAgentManager_List(t *testing.T) {
 }
 
 func TestSubAgent_Run(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "sub-agent result"}, nil
 	})
 
@@ -81,7 +82,7 @@ func TestSubAgent_Run(t *testing.T) {
 }
 
 func TestSubAgent_RunError(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return nil, context.DeadlineExceeded
 	})
 
@@ -101,7 +102,7 @@ func TestSubAgent_RunError(t *testing.T) {
 }
 
 func TestSubAgent_Cancel(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		// 检查取消
 		select {
 		case <-ctx.Done():
@@ -126,7 +127,7 @@ func TestSubAgent_Cancel(t *testing.T) {
 }
 
 func TestSubAgent_WaitTimeout(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		time.Sleep(500 * time.Millisecond)
 		return &provider.ChatResponse{Content: "too slow"}, nil
 	})
@@ -143,7 +144,7 @@ func TestSubAgent_WaitTimeout(t *testing.T) {
 }
 
 func TestSubAgentManager_RunParallel(t *testing.T) {
-	p := newStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 		return &provider.ChatResponse{Content: "done"}, nil
 	})
 
@@ -165,7 +166,7 @@ func TestSubAgentManager_RunParallel(t *testing.T) {
 }
 
 func TestSubAgent_SetMaxSteps(t *testing.T) {
-	p := newStubProvider(nil)
+	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
 	m := NewSubAgentManager()
 	sa := m.Spawn("limited", "limited", p, r)
