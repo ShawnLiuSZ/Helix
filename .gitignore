@@ -35,9 +35,10 @@ dist/
 .env
 .env.local
 
-# SQLite
+# SQLite databases
 *.db
 *.sqlite
+*.sqlite3
 
 # Helix specific
 .helix/
