@@ -178,7 +178,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for _, r := range msg.Runes {
 			a.input += string(r)
 		}
-		a.cursorPos = len(a.input)
+		a.cursorPos = len([]rune(a.input))
 		if strings.HasPrefix(a.input, "/") {
 			a.updateSuggestions()
 		}
@@ -221,9 +221,12 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return a.handleEnter()
 	case "backspace":
-		if len(a.input) > 0 {
-			a.input = a.input[:len(a.input)-1]
+		runes := []rune(a.input)
+		if len(runes) > 0 {
+			runes = runes[:len(runes)-1]
+			a.input = string(runes)
 		}
+		a.cursorPos = len(runes)
 		a.updateSuggestions()
 		return a, nil
 	case "tab":
@@ -238,7 +241,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		if len(key) == 1 {
 			a.input += key
-			a.cursorPos = len(a.input)
+			a.cursorPos = len([]rune(a.input))
 			if strings.HasPrefix(a.input, "/") {
 				a.updateSuggestions()
 			}
