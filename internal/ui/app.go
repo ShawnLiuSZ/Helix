@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,32 +26,35 @@ type App struct {
 	input     string
 	cursorPos int
 
+	// 命令联想
+	showSuggestions bool
+	suggestions     []string
+	suggestionIdx   int
+
 	// 聊天历史
 	messages []chatMessage
 
 	// 状态
-	ready   bool
-	loading bool
+	ready    bool
+	loading  bool
 	quitting bool
 
 	// Agent
-	agent       *agent.MultiAgent
-	provider    provider.Provider
-	tools       *tool.Registry
+	agent    *agent.MultiAgent
+	provider provider.Provider
+	tools    *tool.Registry
+	model    string
 
 	// 会话
-	sessionMgr  *session.Manager
-	activeSess  *session.Session
+	sessionMgr *session.Manager
+	activeSess *session.Session
 
 	// 模式
 	mode        agent.Mode
 	modeDisplay string
 
 	// 环境变量
-	envVars     map[string]string
-	envEditing  bool
-	envEditKey  string
-	envEditVal  string
+	envVars map[string]string
 
 	// 成本
 	costTotal   float64
@@ -58,7 +62,7 @@ type App struct {
 	costLast    float64
 
 	// 流式输出缓冲
-	streamBuf   string
+	streamBuf string
 }
 
 type chatMessage struct {
@@ -66,6 +70,20 @@ type chatMessage struct {
 	Content   string
 	ToolName  string
 	Timestamp time.Time
+}
+
+// 所有可用命令
+var allCommands = []string{
+	"/help", "/mode", "/build", "/plan", "/compose", "/max",
+	"/clear", "/cost", "/env", "/model", "/skills", "/sessions", "/quit",
+}
+
+// 模型列表
+var knownModels = []string{
+	"deepseek-v4-flash", "deepseek-v4-pro",
+	"mimo-v2.5-flash", "mimo-v2.5-pro",
+	"gpt-4o", "gpt-4o-mini",
+	"claude-sonnet-4-20250514",
 }
 
 // 样式
@@ -76,6 +94,9 @@ var (
 	toolStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	inputStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	cursorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("7"))
+	suggestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	suggestionSel   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4"))
 	helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	loadingStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
 	headerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Padding(0, 1)
@@ -97,116 +118,146 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 		envVars:  loadEnvVars(),
 		messages: []chatMessage{
 			{Role: "system", Content: "Helix CLI — 双螺旋 · 多模型 · 可扩展", Timestamp: time.Now()},
-			{Role: "system", Content: "模式: build | /help 查看命令 | Ctrl+C 退出", Timestamp: time.Now()},
+			{Role: "system", Content: "输入任务开始 | 输入 / 查看命令 | Tab 切换模式 | Ctrl+C 退出", Timestamp: time.Now()},
 		},
 	}
 }
 
-// SetSessionManager 设置会话管理器
-func (a *App) SetSessionManager(mgr *session.Manager) {
-	a.sessionMgr = mgr
-}
+func (a *App) SetSessionManager(mgr *session.Manager) { a.sessionMgr = mgr }
+func (a *App) SetModel(m string)                       { a.model = m; a.agent.SetModel(m) }
 
-// SetModel 设置模型名
-func (a *App) SetModel(m string) {
-	a.agent.SetModel(m)
-}
+func (a *App) Init() tea.Cmd { return tea.EnterAltScreen }
 
-// Init 初始化
-func (a *App) Init() tea.Cmd {
-	return tea.Batch(
-		tea.EnterAltScreen,
-	)
-}
-
-// Update 更新状态
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
 		a.ready = true
-
 	case tea.KeyMsg:
 		return a.handleKey(msg)
-
 	case streamChunkMsg:
 		a.streamBuf += string(msg)
-		return a, listenStream(a.streamBuf)
-
+		return a, nil
 	case streamDoneMsg:
 		a.loading = false
-		a.messages = append(a.messages, chatMessage{
-			Role:      "assistant",
-			Content:   a.streamBuf,
-			Timestamp: time.Now(),
-		})
+		a.messages = append(a.messages, chatMessage{Role: "assistant", Content: a.streamBuf, Timestamp: time.Now()})
 		a.streamBuf = ""
 		return a, nil
-
 	case streamErrorMsg:
 		a.loading = false
-		a.messages = append(a.messages, chatMessage{
-			Role:    "error",
-			Content: fmt.Sprintf("Error: %s", string(msg)),
-		})
+		errStr := string(msg)
+		a.messages = append(a.messages, chatMessage{Role: "error", Content: errStr, Timestamp: time.Now()})
 		return a, nil
 	}
-
 	return a, nil
 }
 
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+
+	// 命令联想模式
+	if a.showSuggestions {
+		switch key {
+		case "tab", "down":
+			a.suggestionIdx = (a.suggestionIdx + 1) % len(a.suggestions)
+			return a, nil
+		case "shift+tab", "up":
+			a.suggestionIdx = (a.suggestionIdx - 1 + len(a.suggestions)) % len(a.suggestions)
+			return a, nil
+		case "enter":
+			if len(a.suggestions) > 0 {
+				a.input = a.suggestions[a.suggestionIdx] + " "
+				a.showSuggestions = false
+				a.suggestions = nil
+			}
+			return a, nil
+		case "esc":
+			a.showSuggestions = false
+			a.suggestions = nil
+			return a, nil
+		}
+	}
+
+	switch key {
 	case "ctrl+c":
 		a.quitting = true
 		return a, tea.Quit
-
 	case "esc":
 		a.input = ""
+		a.showSuggestions = false
 		return a, nil
-
 	case "enter":
 		return a.handleEnter()
-
 	case "backspace":
 		if len(a.input) > 0 {
 			a.input = a.input[:len(a.input)-1]
 		}
+		a.updateSuggestions()
 		return a, nil
-
 	case "tab":
-		a.cycleMode()
+		if strings.HasPrefix(a.input, "/") {
+			// 命令联想
+			a.showSuggestions = true
+			a.updateSuggestions()
+		} else {
+			a.cycleMode()
+		}
 		return a, nil
-
 	default:
-		// 普通字符
-		if len(msg.String()) == 1 {
-			a.input += msg.String()
+		if len(key) == 1 {
+			a.input += key
+			a.cursorPos = len(a.input)
+			if strings.HasPrefix(a.input, "/") {
+				a.updateSuggestions()
+			}
 		}
 		return a, nil
 	}
 }
 
+func (a *App) updateSuggestions() {
+	if !strings.HasPrefix(a.input, "/") {
+		a.showSuggestions = false
+		a.suggestions = nil
+		return
+	}
+
+	prefix := strings.ToLower(a.input)
+	var matches []string
+	for _, cmd := range allCommands {
+		if strings.HasPrefix(strings.ToLower(cmd), prefix) {
+			matches = append(matches, cmd)
+		}
+	}
+	sort.Strings(matches)
+
+	if len(matches) > 0 {
+		a.suggestions = matches
+		a.showSuggestions = true
+		if a.suggestionIdx >= len(matches) {
+			a.suggestionIdx = 0
+		}
+	} else {
+		a.showSuggestions = false
+		a.suggestions = nil
+	}
+}
+
 func (a *App) handleEnter() (tea.Model, tea.Cmd) {
+	a.showSuggestions = false
+
 	input := strings.TrimSpace(a.input)
 	if input == "" {
 		return a, nil
 	}
 	a.input = ""
 
-	// 斜杠命令
 	if strings.HasPrefix(input, "/") {
 		return a.handleCommand(input)
 	}
 
-	// 添加用户消息
-	a.messages = append(a.messages, chatMessage{
-		Role:      "user",
-		Content:   input,
-		Timestamp: time.Now(),
-	})
-
+	a.messages = append(a.messages, chatMessage{Role: "user", Content: input, Timestamp: time.Now()})
 	a.loading = true
 	return a, a.runAgent(input)
 }
@@ -219,47 +270,59 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 
 	case "/help":
-		help := `Commands:
-  /help      Show this help
-  /mode      Show current mode
-  /build     Switch to build mode
-  /plan      Switch to plan mode (read-only)
-  /compose   Switch to compose mode
-  /max       Switch to max mode (experimental)
-  /clear     Clear chat history
-  /cost      Show cost summary
-  /sessions  List sessions
-  /quit      Exit`
+		help := `📋 命令列表:
+  /help      显示帮助
+  /mode      显示当前模式
+  /build     切换到 build 模式
+  /plan      切换到 plan 模式(只读)
+  /compose   切换到 compose 模式
+  /max       切换到 max 模式(实验)
+  /model     显示/切换模型
+  /skills    显示可用工具列表
+  /clear     清空聊天
+  /cost      显示成本
+  /env       环境变量管理
+  /sessions  会话列表
+  /quit      退出
+
+💡 提示:
+  Tab 切换模式 | 输入 / 后 Tab 联想命令
+  直接输入任务开始对话`
 		a.messages = append(a.messages, chatMessage{Role: "system", Content: help})
 		return a, nil
 
+	case "/model":
+		return a.handleModelCmd(parts)
+
+	case "/skills":
+		return a.handleSkillsCmd()
+
 	case "/mode":
-		msg := fmt.Sprintf("Current mode: %s", a.mode.String())
-		a.messages = append(a.messages, chatMessage{Role: "system", Content: msg})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("当前模式: %s | 模型: %s", a.mode.String(), a.model)})
 		return a, nil
 
 	case "/build":
 		a.mode = agent.ModeBuild
 		a.agent.SetMode(a.mode)
-		a.messages = append(a.messages, chatMessage{Role: "system", Content: "Switched to build mode"})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "切换到 build 模式"})
 		return a, nil
 
 	case "/plan":
 		a.mode = agent.ModePlan
 		a.agent.SetMode(a.mode)
-		a.messages = append(a.messages, chatMessage{Role: "system", Content: "Switched to plan mode (read-only)"})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "切换到 plan 模式(只读)"})
 		return a, nil
 
 	case "/compose":
 		a.mode = agent.ModeCompose
 		a.agent.SetMode(a.mode)
-		a.messages = append(a.messages, chatMessage{Role: "system", Content: "Switched to compose mode"})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "切换到 compose 模式"})
 		return a, nil
 
 	case "/max":
 		a.mode = agent.ModeMax
 		a.agent.SetMode(a.mode)
-		a.messages = append(a.messages, chatMessage{Role: "system", Content: "Switched to max mode (experimental)"})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "切换到 max 模式(实验)"})
 		return a, nil
 
 	case "/clear":
@@ -267,8 +330,7 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case "/cost":
-		msg := fmt.Sprintf("Session: $%.4f | Last: $%.4f | Total: $%.4f",
-			a.costSession, a.costLast, a.costTotal)
+		msg := fmt.Sprintf("会话: $%.4f | 上次: $%.4f | 累计: $%.4f", a.costSession, a.costLast, a.costTotal)
 		a.messages = append(a.messages, chatMessage{Role: "system", Content: msg})
 		return a, nil
 
@@ -277,11 +339,56 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	default:
 		a.messages = append(a.messages, chatMessage{
-			Role:    "system",
-			Content: fmt.Sprintf("Unknown command: %s. Type /help for available commands.", cmd),
+			Role: "system", Content: fmt.Sprintf("未知命令: %s。输入 /help 查看可用命令。", cmd),
 		})
 		return a, nil
 	}
+}
+
+func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
+	if len(parts) < 2 {
+		// 显示当前模型和可用模型
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("当前模型: %s\n\n可用模型:\n", a.model))
+		for _, m := range knownModels {
+			marker := "  "
+			if m == a.model {
+				marker = "▶ "
+			}
+			sb.WriteString(fmt.Sprintf("%s%s\n", marker, m))
+		}
+		sb.WriteString("\n切换: /model <model-name>")
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: sb.String()})
+		return a, nil
+	}
+
+	newModel := parts[1]
+	a.model = newModel
+	a.agent.SetModel(newModel)
+	a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("模型切换为: %s", newModel)})
+	return a, nil
+}
+
+func (a *App) handleSkillsCmd() (tea.Model, tea.Cmd) {
+	tools := a.tools.List()
+	if len(tools) == 0 {
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "没有注册的工具"})
+		return a, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📦 可用工具 (%d):\n\n", len(tools)))
+	for _, t := range tools {
+		readOnly := ""
+		if t.IsReadOnly() {
+			readOnly = " 📖"
+		} else {
+			readOnly = " ✏️"
+		}
+		sb.WriteString(fmt.Sprintf("  %s%s - %s\n", t.Name(), readOnly, t.Description()))
+	}
+	a.messages = append(a.messages, chatMessage{Role: "system", Content: sb.String()})
+	return a, nil
 }
 
 func (a *App) cycleMode() {
@@ -293,10 +400,7 @@ func (a *App) cycleMode() {
 		}
 	}
 	a.agent.SetMode(a.mode)
-	a.messages = append(a.messages, chatMessage{
-		Role:    "system",
-		Content: fmt.Sprintf("Mode: %s", a.mode.String()),
-	})
+	a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("模式: %s", a.mode.String())})
 }
 
 // View 渲染界面
@@ -311,8 +415,7 @@ func (a *App) View() string {
 	var sb strings.Builder
 
 	// 标题栏
-	title := a.renderTitle()
-	sb.WriteString(title)
+	sb.WriteString(a.renderTitle())
 	sb.WriteString("\n")
 
 	// 分隔线
@@ -320,18 +423,37 @@ func (a *App) View() string {
 	sb.WriteString("\n")
 
 	// 消息区域
-	msgArea := a.height - 5 // 减去标题+输入+状态栏
+	suggLines := 0
+	if a.showSuggestions && len(a.suggestions) > 0 {
+		suggLines = len(a.suggestions) + 1
+	}
+	msgArea := a.height - 5 - suggLines
+	if msgArea < 3 {
+		msgArea = 3
+	}
 	sb.WriteString(a.renderMessages(msgArea))
 
 	// 加载指示器
 	if a.loading {
 		spinChars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		idx := int(time.Now().UnixMilli()/100) % len(spinChars)
-		sb.WriteString(loadingStyle.Render(fmt.Sprintf(" %s Thinking...", spinChars[idx])))
+		sb.WriteString(loadingStyle.Render(fmt.Sprintf(" %s 思考中...", spinChars[idx])))
 		sb.WriteString("\n")
 	}
 
-	// 输入区域
+	// 命令联想
+	if a.showSuggestions && len(a.suggestions) > 0 {
+		for i, s := range a.suggestions {
+			if i == a.suggestionIdx {
+				sb.WriteString(suggestionSel.Render(" ▶ " + s))
+			} else {
+				sb.WriteString(suggestionStyle.Render("   " + s))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// 输入区域（带光标）
 	sb.WriteString(a.renderInput())
 	sb.WriteString("\n")
 
@@ -342,24 +464,17 @@ func (a *App) View() string {
 }
 
 func (a *App) renderTitle() string {
-	modeColor := map[agent.Mode]string{
-		agent.ModeBuild:   "🛠",
-		agent.ModePlan:    "📋",
-		agent.ModeCompose: "📦",
-		agent.ModeMax:     "⚡",
+	modeIcons := map[agent.Mode]string{
+		agent.ModeBuild: "🛠", agent.ModePlan: "📋", agent.ModeCompose: "📦", agent.ModeMax: "⚡",
 	}
-
-	icon := modeColor[a.mode]
-	title := fmt.Sprintf("%s Helix CLI | %s mode | %s",
-		icon, a.mode.String(), a.provider.Name())
-
+	icon := modeIcons[a.mode]
+	title := fmt.Sprintf("%s Helix CLI | %s | %s | %s",
+		icon, a.mode.String(), a.provider.Name(), a.model)
 	return headerStyle.Width(a.width).Render(title)
 }
 
 func (a *App) renderMessages(visibleLines int) string {
 	var sb strings.Builder
-
-	// 计算可见消息
 	startIdx := 0
 	totalLines := 0
 	for i := len(a.messages) - 1; i >= 0; i-- {
@@ -386,12 +501,11 @@ func (a *App) renderMessages(visibleLines int) string {
 		case "tool":
 			sb.WriteString(toolStyle.Render("  🔧 " + msg.Content))
 		case "error":
-			sb.WriteString(errorStyle.Render("  ✖ " + msg.Content))
+			sb.WriteString(errorStyle.Render("  ✖ " + truncateStr(msg.Content, a.width-4)))
 		}
 		sb.WriteString("\n")
 	}
 
-	// 流式输出缓冲
 	if a.loading && a.streamBuf != "" {
 		for _, line := range strings.Split(a.streamBuf, "\n") {
 			sb.WriteString(assistantStyle.Render("  " + line))
@@ -406,18 +520,36 @@ func (a *App) renderInput() string {
 	prompt := fmt.Sprintf(" %s > ", a.mode.String())
 	full := prompt + a.input
 
+	// 光标位置
+	if len(a.input) > 0 {
+		cursorAt := len(prompt) + a.cursorPos
+		if cursorAt >= len(full) {
+			cursorAt = len(full) - 1
+		}
+		if cursorAt >= 0 {
+			before := full[:cursorAt]
+			char := string(full[cursorAt])
+			after := ""
+			if cursorAt+1 < len(full) {
+				after = full[cursorAt+1:]
+			}
+			full = before + cursorStyle.Render(char) + after
+		}
+	}
+
 	return inputStyle.Width(a.width - 2).Render(full)
 }
 
 func (a *App) renderStatusBar() string {
 	costDisplay := a.renderCost()
-
-	left := fmt.Sprintf(" %s | Tab:切换模式 | /help:帮助", a.provider.Name())
+	left := fmt.Sprintf(" %s | %s | Tab:模式 | /:命令", a.provider.Name(), a.model)
 	right := costDisplay
 
-	padding := a.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if padding < 0 {
-		padding = 0
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	padding := a.width - leftW - rightW
+	if padding < 1 {
+		padding = 1
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
@@ -434,17 +566,13 @@ func (a *App) renderCost() string {
 	return costRedStyle.Render(fmt.Sprintf("$%.4f", a.costSession))
 }
 
-// runAgent 异步运行 Agent
 func (a *App) runAgent(input string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		result, err := a.agent.Run(ctx, input)
-
 		if err != nil {
 			return streamErrorMsg(err.Error())
 		}
-
-		// 模拟流式输出：将结果分块发送
 		chunks := splitIntoChunks(result, 50)
 		cmds := make([]tea.Cmd, len(chunks))
 		for i, chunk := range chunks {
@@ -453,10 +581,7 @@ func (a *App) runAgent(input string) tea.Cmd {
 				return streamChunkMsg(c)
 			})
 		}
-
-		return tea.Sequence(append(cmds, func() tea.Msg {
-			return streamDoneMsg{}
-		})...)
+		return tea.Sequence(append(cmds, func() tea.Msg { return streamDoneMsg{} })...)
 	}
 }
 
@@ -473,43 +598,30 @@ func splitIntoChunks(s string, size int) []string {
 	return chunks
 }
 
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 // 消息类型
 type streamChunkMsg string
 type streamDoneMsg struct{}
 type streamErrorMsg string
 
-// listenStream 监听流式输出（用于 Bubble Tea 循环）
-func listenStream(buf string) tea.Cmd {
-	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
-		return streamChunkMsg("")
-	})
-}
-
 // ============================================================
 // 环境变量管理
 // ============================================================
 
-// loadEnvVars 加载已知环境变量
 func loadEnvVars() map[string]string {
 	vars := make(map[string]string)
-	keys := []string{
-		"DEEPSEEK_API_KEY",
-		"MIMO_API_KEY",
-		"OPENAI_API_KEY",
-		"ANTHROPIC_API_KEY",
-	}
-
-	for _, key := range keys {
-		if val := getEnv(key); val != "" {
+	for _, key := range []string{"DEEPSEEK_API_KEY", "MIMO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if val := os.Getenv(key); val != "" {
 			vars[key] = maskValue(val)
 		}
 	}
-
 	return vars
-}
-
-func getEnv(key string) string {
-	return os.Getenv(key)
 }
 
 func maskValue(val string) string {
@@ -519,88 +631,52 @@ func maskValue(val string) string {
 	return val[:4] + strings.Repeat("*", len(val)-8) + val[len(val)-4:]
 }
 
-// handleEnvCommand 处理 /env 命令
 func (a *App) handleEnvCommand(parts []string) (tea.Model, tea.Cmd) {
 	if len(parts) < 2 {
-		// /env — 显示所有环境变量
 		return a.showEnvVars()
 	}
-
-	subCmd := parts[1]
-	switch subCmd {
+	switch parts[1] {
 	case "set":
 		if len(parts) < 4 {
-			a.messages = append(a.messages, chatMessage{
-				Role:    "system",
-				Content: "Usage: /env set <KEY> <VALUE>",
-			})
+			a.messages = append(a.messages, chatMessage{Role: "system", Content: "用法: /env set <KEY> <VALUE>"})
 			return a, nil
 		}
 		key := parts[2]
 		val := strings.Join(parts[3:], " ")
-		return a.setEnvVar(key, val)
-
+		os.Setenv(key, val)
+		a.envVars[key] = maskValue(val)
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("已设置 %s = %s", key, maskValue(val))})
+		return a, nil
 	case "unset":
 		if len(parts) < 3 {
-			a.messages = append(a.messages, chatMessage{
-				Role:    "system",
-				Content: "Usage: /env unset <KEY>",
-			})
+			a.messages = append(a.messages, chatMessage{Role: "system", Content: "用法: /env unset <KEY>"})
 			return a, nil
 		}
-		return a.unsetEnvVar(parts[2])
-
+		key := parts[2]
+		delete(a.envVars, key)
+		os.Unsetenv(key)
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("已移除 %s", key)})
+		return a, nil
 	case "reload":
 		a.envVars = loadEnvVars()
-		a.messages = append(a.messages, chatMessage{
-			Role:    "system",
-			Content: "Environment variables reloaded",
-		})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "环境变量已重新加载"})
 		return a, nil
-
 	default:
-		a.messages = append(a.messages, chatMessage{
-			Role:    "system",
-			Content: fmt.Sprintf("Unknown env command: %s. Use: /env [set|unset|reload]", subCmd),
-		})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "用法: /env [set|unset|reload]"})
 		return a, nil
 	}
 }
 
 func (a *App) showEnvVars() (tea.Model, tea.Cmd) {
 	if len(a.envVars) == 0 {
-		a.messages = append(a.messages, chatMessage{
-			Role:    "system",
-			Content: "No environment variables configured.\n\nUse /env set <KEY> <VALUE> to add one.\nCommon keys: DEEPSEEK_API_KEY, MIMO_API_KEY, OPENAI_API_KEY",
-		})
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "没有配置的环境变量。\n\n使用 /env set <KEY> <VALUE> 添加。"})
 		return a, nil
 	}
-
 	var sb strings.Builder
-	sb.WriteString("Environment Variables:\n\n")
+	sb.WriteString("环境变量:\n\n")
 	for key, val := range a.envVars {
 		sb.WriteString(fmt.Sprintf("  %s = %s\n", key, val))
 	}
-	sb.WriteString("\nCommands: /env set <KEY> <VAL> | /env unset <KEY> | /env reload")
-
 	a.messages = append(a.messages, chatMessage{Role: "system", Content: sb.String()})
-	return a, nil
-}
-
-func (a *App) setEnvVar(key, val string) (tea.Model, tea.Cmd) {
-	a.envVars[key] = maskValue(val)
-	a.messages = append(a.messages, chatMessage{
-		Role:    "system",
-		Content: fmt.Sprintf("Set %s = %s\n\nNote: This only affects the current TUI session. For permanent changes, set the environment variable in your shell profile.", key, maskValue(val)),
-	})
-	return a, nil
-}
-
-func (a *App) unsetEnvVar(key string) (tea.Model, tea.Cmd) {
-	delete(a.envVars, key)
-	a.messages = append(a.messages, chatMessage{
-		Role:    "system",
-		Content: fmt.Sprintf("Unset %s", key),
-	})
 	return a, nil
 }
