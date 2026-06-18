@@ -55,9 +55,19 @@ release:
   draft: true
   prerelease: auto
   footer: |
-    **Install:**
+    ## Helix CLI — 双螺旋 · 多模型 · 可扩展
+    
+    **Quick Install:**
     ```bash
     curl -fsSL https://raw.githubusercontent.com/ShawnLiuSZ/Helix/main/scripts/install.sh | bash
+    ```
+    
+    **Usage:**
+    ```bash
+    helix                          # Start interactive TUI
+    helix --session <id>           # Resume a session
+    helix run "your task"          # Single task mode
+    echo "task" | helix run        # Pipe mode
     ```
 
 brews:
