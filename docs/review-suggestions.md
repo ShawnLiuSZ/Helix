@@ -56,9 +56,9 @@
 
 ### 待优化
 
-- [ ] DeepSeek: 前缀缓存 TTL 动态感知
-- [ ] MiMo: OAuth token 自动刷新
-- [ ] 通用: HTTP 重试 + 指数退避
+- [x] DeepSeek: 前缀缓存 TTL 动态感知
+- [x] MiMo: OAuth token 自动刷新
+- [x] 通用: HTTP 重试 + 指数退避
 
 ---
 

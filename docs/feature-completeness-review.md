@@ -51,10 +51,10 @@
 
 ### 短期
 
-- [ ] DeepSeek 前缀缓存动态 TTL 感知
-- [ ] MiMo OAuth token 自动刷新
-- [ ] HTTP 请求重试 + 指数退避
-- [ ] 流式输出真正实现（非模拟分块）
+- [x] DeepSeek 前缀缓存动态 TTL 感知
+- [x] MiMo OAuth token 自动刷新
+- [x] HTTP 请求重试 + 指数退避
+- [x] 流式输出真正实现（非模拟分块）
 
 ### 中期
 
