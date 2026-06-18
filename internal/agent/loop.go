@@ -5,28 +5,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	contextpkg "github.com/ShawnLiuSZ/Helix/internal/context"
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
 // Agent 核心 Agent
 type Agent struct {
-	provider provider.Provider
-	tools    *tool.Registry
-	executor *tool.Executor
-	messages []provider.Message
-	maxSteps int
-	model    string
+	provider  provider.Provider
+	tools     *tool.Registry
+	executor  *tool.Executor
+	messages  []provider.Message
+	maxSteps  int
+	model     string
+	partition *contextpkg.Partition // 上下文分区（缓存感知）
 }
 
 // New 创建 Agent
 func New(p provider.Provider, registry *tool.Registry) *Agent {
+	caps := p.Capabilities()
+	ttl := caps.CacheTTL
+	if ttl == 0 {
+		ttl = 5 * time.Minute // 默认 5 分钟
+	}
+
 	return &Agent{
-		provider: p,
-		tools:    registry,
-		executor: tool.NewExecutor(registry),
-		maxSteps: 10,
+		provider:  p,
+		tools:     registry,
+		executor:  tool.NewExecutor(registry),
+		partition: contextpkg.NewPartition(ttl),
+		maxSteps:  10,
 	}
 }
 
