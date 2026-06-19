@@ -69,6 +69,65 @@ func (a *Agent) SetCostCallback(fn func(float64)) { a.onCost = fn }
 // AddGuard 添加工具执行守卫
 func (a *Agent) AddGuard(g tool.Guard) { a.executor.AddGuard(g) }
 
+// getContextWindow 获取当前模型的上下文窗口大小
+func (a *Agent) getContextWindow() int {
+	for _, m := range a.provider.Models() {
+		if m.ID == a.model && m.ContextWindow > 0 {
+			return m.ContextWindow
+		}
+	}
+	return 0 // 未知模型，不截断
+}
+
+// estimateTokens 粗略估算消息列表的 token 数（1 token ≈ 4 bytes for English, ~2 for CJK）
+func estimateTokens(messages []provider.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(msg.Content) / 3 // 粗略估算
+		if len(msg.ToolCalls) > 0 {
+			total += 50 * len(msg.ToolCalls) // 工具调用开销
+		}
+	}
+	return total
+}
+
+// truncateMessages 截断消息列表以适应上下文窗口
+// 保留 system prompt（第一条）和最近的消息，丢弃中间最旧的 tool 结果
+func (a *Agent) truncateMessages(ctxWindow int) {
+	if ctxWindow <= 0 {
+		return
+	}
+
+	// 保留 20% 作为输出预算
+	maxInput := ctxWindow * 80 / 100
+
+	tokens := estimateTokens(a.messages)
+	if tokens <= maxInput {
+		return
+	}
+
+	// 从最旧的非 system 消息开始删除（优先删除 tool 结果，它们最冗长）
+	// 保留 system prompt（index 0）和最近 4 条消息
+	const keepRecent = 4
+	for len(a.messages) > keepRecent+1 && tokens > maxInput {
+		// 找到最旧的可删除消息（跳过 system）
+		delIdx := -1
+		for i := 1; i < len(a.messages)-keepRecent; i++ {
+			if a.messages[i].Role == "tool" {
+				delIdx = i
+				break
+			}
+		}
+		// 如果没有 tool 消息，删除最旧的非 system 消息
+		if delIdx == -1 {
+			delIdx = 1
+		}
+
+		tokens -= estimateTokens([]provider.Message{a.messages[delIdx]})
+		a.messages = append(a.messages[:delIdx], a.messages[delIdx+1:]...)
+	}
+}
+
 // RunStream 流式运行 Agent，通过 channel 返回文本增量
 func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-chan error) {
 	textCh := make(chan string, 100)
@@ -95,6 +154,9 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 			default:
 			}
 
+			// 截断以适应上下文窗口
+			a.truncateMessages(a.getContextWindow())
+
 			streamCh, err := a.provider.Stream(ctx, &provider.ChatRequest{
 				Model:    a.model,
 				Messages: a.messages,
@@ -105,34 +167,34 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 				return
 			}
 
-		var fullContent string
-		var toolCalls []provider.ToolCall
-		var toolCallDeltas []provider.ToolCallDelta
-		var lastUsage *provider.Usage
+			var fullContent string
+			var toolCalls []provider.ToolCall
+			var toolCallDeltas []provider.ToolCallDelta
+			var lastUsage *provider.Usage
 
-		for event := range streamCh {
-			switch event.Type {
-			case provider.EventText:
-				fullContent += event.Content
-				textCh <- event.Content
-			case provider.EventToolCall:
-				if event.ToolCall != nil {
-					toolCallDeltas = append(toolCallDeltas, *event.ToolCall)
+			for event := range streamCh {
+				switch event.Type {
+				case provider.EventText:
+					fullContent += event.Content
+					textCh <- event.Content
+				case provider.EventToolCall:
+					if event.ToolCall != nil {
+						toolCallDeltas = append(toolCallDeltas, *event.ToolCall)
+					}
+				case provider.EventDone:
+					if event.Usage != nil {
+						lastUsage = event.Usage
+					}
+				case provider.EventError:
+					errCh <- fmt.Errorf("stream error: %s", event.Content)
+					return
 				}
-			case provider.EventDone:
-				if event.Usage != nil {
-					lastUsage = event.Usage
-				}
-			case provider.EventError:
-				errCh <- fmt.Errorf("stream error: %s", event.Content)
-				return
 			}
-		}
 
-		if lastUsage != nil && a.onCost != nil {
-			cost := a.provider.Cost(a.model, *lastUsage)
-			a.onCost(cost.TotalCost)
-		}
+			if lastUsage != nil && a.onCost != nil {
+				cost := a.provider.Cost(a.model, *lastUsage)
+				a.onCost(cost.TotalCost)
+			}
 
 			// 合并工具调用增量
 			toolCalls = mergeToolCallDeltas(toolCallDeltas)
@@ -187,7 +249,6 @@ func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
 		if d.Name != "" {
 			tc.Function.Name = d.Name
 		}
-		// 累积 arguments
 		if d.Arguments != "" {
 			tc.Function.Arguments += d.Arguments
 		}
@@ -202,6 +263,7 @@ func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
 	}
 	return result
 }
+
 func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 	sysPrompt := a.buildSystemPrompt()
 	a.partition.SetPrefix(sysPrompt)
@@ -218,6 +280,9 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 			return "", ctx.Err()
 		default:
 		}
+
+		// 截断以适应上下文窗口
+		a.truncateMessages(a.getContextWindow())
 
 		resp, err := a.provider.Chat(ctx, &provider.ChatRequest{
 			Model:    a.model,
@@ -239,7 +304,6 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 			assistantMsg.Content = resp.Content
 		}
 		if len(resp.ToolCalls) > 0 {
-			// 序列化 Args 到 Function.Arguments
 			for i := range resp.ToolCalls {
 				argsJSON, _ := json.Marshal(resp.ToolCalls[i].Args)
 				resp.ToolCalls[i].Function.Arguments = string(argsJSON)
@@ -255,7 +319,6 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 
 		// 无工具调用 → 返回最终答案
 		if len(resp.ToolCalls) == 0 {
-			// 检查 Goal 是否达成
 			if a.goal.IsEnabled() {
 				achieved, _, evalErr := a.goal.Evaluate(ctx, a.messages)
 				if evalErr == nil && achieved {
@@ -286,7 +349,7 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 			})
 		}
 
-		// 每 3 步评估一次 Goal（避免过于频繁）
+		// 每 3 步评估一次 Goal
 		if a.goal.IsEnabled() && (step+1)%3 == 0 {
 			achieved, reason, evalErr := a.goal.Evaluate(ctx, a.messages)
 			if evalErr == nil && achieved {
@@ -295,7 +358,7 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 		}
 	}
 
-	// 最终检查 Goal 是否达成（即使达到最大步数）
+	// 最终检查 Goal
 	if a.goal.IsEnabled() {
 		achieved, reason, evalErr := a.goal.Evaluate(ctx, a.messages)
 		if evalErr == nil && achieved {
@@ -328,12 +391,9 @@ func (a *Agent) buildSystemPrompt() string {
 	if a.skillsMgr != nil {
 		skillList := a.skillsMgr.List()
 		if len(skillList) > 0 {
-			sb.WriteString("\n## Available Skills\n")
+			sb.WriteString("\n## Available Skills (use /skills <name> to load full content)\n")
 			for _, s := range skillList {
-				content, err := s.Content()
-				if err == nil && content != "" {
-					sb.WriteString(fmt.Sprintf("\n### %s\n%s\n", s.Name, content))
-				}
+				sb.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
 			}
 		}
 	}
