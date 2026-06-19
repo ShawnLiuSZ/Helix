@@ -96,6 +96,9 @@ type App struct {
 
 	// Markdown renderer
 	glamourRenderer *glamour.TermRenderer
+
+	// 渲染缓存（消息内容 → 渲染结果）
+	renderCache map[string]string
 }
 
 type chatMessage struct {
@@ -168,6 +171,7 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 		skillsMgr:      skillsMgr,
 		textArea:       ta,
 		glamourRenderer: renderer,
+		renderCache:    make(map[string]string),
 		messages: []chatMessage{
 			{Role: "system", Content: "Helix CLI — 双螺旋 · 多模型 · 可扩展", Timestamp: time.Now()},
 			{Role: "system", Content: "输入任务开始 | 输入 / 查看命令 | Tab 切换模式 | Ctrl+C 退出", Timestamp: time.Now()},
@@ -380,7 +384,15 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	return a, nil
+	// 转发其他按键到 textarea（字母、退格、方向键等）
+	var cmd tea.Cmd
+	a.textArea, cmd = a.textArea.Update(msg)
+	if strings.HasPrefix(a.textArea.Value(), "/") {
+		a.updateSuggestions()
+	} else {
+		a.showSuggestions = false
+	}
+	return a, cmd
 }
 
 func (a *App) updateSuggestions() {
@@ -879,16 +891,29 @@ func (a *App) renderMessages(visibleLines int) string {
 	return sb.String()
 }
 
-// renderMarkdown 用 glamour 渲染 markdown，失败时回退到纯文本
+// renderMarkdown 用 glamour 渲染 markdown，带缓存，失败时回退到纯文本
 func (a *App) renderMarkdown(content string) string {
 	if a.glamourRenderer == nil {
 		return content
 	}
+
+	// 检查缓存
+	if cached, ok := a.renderCache[content]; ok {
+		return cached
+	}
+
 	rendered, err := a.glamourRenderer.Render(content)
 	if err != nil {
 		return content
 	}
-	return strings.TrimRight(rendered, "\n")
+	result := strings.TrimRight(rendered, "\n")
+
+	// 缓存结果（限制缓存大小，避免内存无限增长）
+	if len(a.renderCache) < 500 {
+		a.renderCache[content] = result
+	}
+
+	return result
 }
 
 func (a *App) renderStatusBar() string {
