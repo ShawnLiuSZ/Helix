@@ -77,10 +77,10 @@ func (c *RetryableHTTPClient) Do(req *http.Request) (*http.Response, error) {
 		}
 
 		// 每次重试需要重新读取 body（如果有）
-		if attempt > 0 && req.Body != nil {
-			// 注意：这里假设 body 是可重复读取的（bytes.Reader）
-			if seeker, ok := req.Body.(interface{ Seek(int64, int) (int64, error) }); ok {
-				seeker.Seek(0, 0)
+		if attempt > 0 && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err == nil {
+				req.Body = body
 			}
 		}
 

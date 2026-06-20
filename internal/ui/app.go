@@ -769,17 +769,9 @@ func (a *App) handleCompactCmd() (tea.Model, tea.Cmd) {
 	for _, msg := range middle {
 		switch msg.Role {
 		case "user":
-			content := msg.Content
-			if len(content) > 100 {
-				content = content[:100] + "..."
-			}
-			summary.WriteString(fmt.Sprintf("- 用户: %s\n", content))
+			summary.WriteString(fmt.Sprintf("- 用户: %s\n", truncateRunes(msg.Content, 100)))
 		case "assistant":
-			content := msg.Content
-			if len(content) > 100 {
-				content = content[:100] + "..."
-			}
-			summary.WriteString(fmt.Sprintf("- 助手: %s\n", content))
+			summary.WriteString(fmt.Sprintf("- 助手: %s\n", truncateRunes(msg.Content, 100)))
 		}
 	}
 
@@ -1015,6 +1007,15 @@ func (a *App) runAgent(ctx context.Context, input string) tea.Cmd {
 type streamChunkMsg string
 type streamDoneMsg struct{ cost float64 }
 type streamErrorMsg string
+
+// truncateRunes 按 rune 边界截断字符串，避免切在多字节字符中间
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
 
 // friendlyError 将常见错误映射为用户友好提示
 func friendlyError(err string) string {

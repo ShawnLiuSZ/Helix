@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
+
+// maxSSEReaderBufSize SSE 读缓冲区最大 10MB
+const maxSSEReaderBufSize = 10 * 1024 * 1024
 
 // SSEReader SSE 事件读取器
 type SSEReader struct {
@@ -31,6 +35,12 @@ func (s *SSEReader) Read() ([]byte, error) {
 		n, err := s.reader.Read(s.tmp)
 		if n > 0 {
 			s.buf = append(s.buf, s.tmp[:n]...)
+		}
+
+		// 检查缓冲区大小，防止 OOM
+		if len(s.buf) > maxSSEReaderBufSize {
+			s.buf = s.buf[:0]
+			return nil, fmt.Errorf("SSE buffer exceeded maximum size (%d bytes)", maxSSEReaderBufSize)
 		}
 
 		for {
