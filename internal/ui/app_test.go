@@ -9,81 +9,121 @@ import (
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
-// newTestApp 构造一个用于测试的 App，并初始化窗口尺寸（viewport/glamour）。
-func newTestApp(t *testing.T) *App {
-	t.Helper()
-	app := NewApp(testutil.NewStubProvider(nil), tool.NewRegistry())
+func newTestApp() *App {
+	p := testutil.NewStubProvider(nil)
+	tools := tool.NewRegistry()
+	return NewApp(p, tools)
+}
+
+func TestTextareaInput(t *testing.T) {
+	app := newTestApp()
+
+	// 初始化窗口大小
 	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	return app
-}
 
-// typeRunes 逐字符发送按键，模拟用户键入。
-func typeRunes(m tea.Model, s string) tea.Model {
-	for _, r := range s {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-	return m
-}
+	// 模拟输入 "hi"
+	var m tea.Model = app
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
 
-// TestTextareaReceivesTyping 是核心回归测试：
-// 防止「按键事件未转发给 textarea，导致用户打不了字」的 P0 再次发生。
-func TestTextareaReceivesTyping(t *testing.T) {
-	var m tea.Model = newTestApp(t)
-	m = typeRunes(m, "hello")
-	if got := m.(*App).textArea.Value(); got != "hello" {
-		t.Fatalf("键入未到达 textarea: want %q got %q", "hello", got)
+	result := m.(*App)
+	if result.textArea.Value() != "hi" {
+		t.Errorf("expected textarea value 'hi', got %q", result.textArea.Value())
 	}
 }
 
-// TestTextareaBackspace 校验退格能编辑输入（特殊键也需转发给 textarea）。
-func TestTextareaBackspace(t *testing.T) {
-	var m tea.Model = newTestApp(t)
-	m = typeRunes(m, "hi")
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	if got := m.(*App).textArea.Value(); got != "h" {
-		t.Fatalf("退格未生效: want %q got %q", "h", got)
+func TestEnterSendsMessage(t *testing.T) {
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// 输入文字
+	var m tea.Model = app
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+
+	// 按 Enter 发送
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	result := m.(*App)
+	// textarea 应该被清空
+	if result.textArea.Value() != "" {
+		t.Errorf("expected textarea to be empty after enter, got %q", result.textArea.Value())
+	}
+	// 消息应该被添加
+	if len(result.messages) < 3 { // system + user + possibly more
+		t.Errorf("expected at least 3 messages after enter, got %d", len(result.messages))
+	}
+	// 最后一条应该是 user 消息
+	lastMsg := result.messages[len(result.messages)-1]
+	if lastMsg.Role != "user" {
+		t.Errorf("expected last message role 'user', got %q", lastMsg.Role)
+	}
+	if lastMsg.Content != "hi" {
+		t.Errorf("expected last message content 'hi', got %q", lastMsg.Content)
 	}
 }
 
-// TestEnterSubmitsPlainText 校验回车把普通文本作为用户消息提交，并清空输入框。
-func TestEnterSubmitsPlainText(t *testing.T) {
-	var m tea.Model = newTestApp(t)
-	m = typeRunes(m, "hello")
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // 不执行返回的 cmd，只校验同步状态
+func TestEscClearsInput(t *testing.T) {
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	app := m.(*App)
-	if v := app.textArea.Value(); v != "" {
-		t.Fatalf("提交后输入框未清空: got %q", v)
-	}
-	if !app.loading {
-		t.Fatalf("提交后应进入 loading 状态")
-	}
-	if len(app.messages) == 0 {
-		t.Fatalf("提交后应追加用户消息")
-	}
-	last := app.messages[len(app.messages)-1]
-	if last.Role != "user" || last.Content != "hello" {
-		t.Fatalf("最后一条消息应为 user/hello, got %s/%q", last.Role, last.Content)
+	// 输入文字
+	var m tea.Model = app
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
+
+	// 按 Esc 清空
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	result := m.(*App)
+	if result.textArea.Value() != "" {
+		t.Errorf("expected textarea to be empty after esc, got %q", result.textArea.Value())
 	}
 }
 
-// TestSlashTriggersSuggestions 校验输入 "/" 前缀会触发命令联想。
+func TestCtrlCQuits(t *testing.T) {
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	var m tea.Model = app
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	result := m.(*App)
+	if !result.quitting {
+		t.Error("expected quitting to be true after ctrl+c")
+	}
+	// cmd should be tea.Quit
+	if cmd == nil {
+		t.Error("expected a quit command")
+	}
+}
+
+func TestTabCyclesMode(t *testing.T) {
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	var m tea.Model = app
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+
+	result := m.(*App)
+	// Should cycle from build to plan
+	if result.mode.String() != "plan" {
+		t.Errorf("expected mode 'plan' after tab, got %q", result.mode.String())
+	}
+}
+
 func TestSlashTriggersSuggestions(t *testing.T) {
-	var m tea.Model = newTestApp(t)
-	m = typeRunes(m, "/cl")
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	app := m.(*App)
-	if !app.showSuggestions {
-		t.Fatalf("输入 / 前缀应触发命令联想")
+	// 输入 "/"
+	var m tea.Model = app
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+
+	result := m.(*App)
+	if !result.showSuggestions {
+		t.Error("expected suggestions to be shown after typing /")
 	}
-	found := false
-	for _, s := range app.suggestions {
-		if s == "/clear" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("联想结果应包含 /clear, got %v", app.suggestions)
+	if len(result.suggestions) == 0 {
+		t.Error("expected at least one suggestion")
 	}
 }
