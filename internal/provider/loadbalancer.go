@@ -126,10 +126,13 @@ func NewLoadBalancer(providers []Provider, strategy Strategy) *LoadBalancer {
 	return lb
 }
 
-// SetWeight 设置 Provider 权重
+// SetWeight 设置 Provider 权重（最小为 0）
 func (lb *LoadBalancer) SetWeight(name string, weight int) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
+	if weight < 0 {
+		weight = 0
+	}
 	lb.weights[name] = weight
 }
 
@@ -166,16 +169,23 @@ func (lb *LoadBalancer) roundRobin() Provider {
 func (lb *LoadBalancer) weightedRandom() Provider {
 	totalWeight := 0
 	for _, p := range lb.providers {
-		totalWeight += lb.weights[p.Name()]
+		w := lb.weights[p.Name()]
+		if w > 0 {
+			totalWeight += w
+		}
 	}
 
-	if totalWeight == 0 {
+	if totalWeight <= 0 {
 		return lb.providers[0]
 	}
 
 	r := rand.Intn(totalWeight)
 	for _, p := range lb.providers {
-		r -= lb.weights[p.Name()]
+		w := lb.weights[p.Name()]
+		if w <= 0 {
+			continue
+		}
+		r -= w
 		if r < 0 {
 			return p
 		}

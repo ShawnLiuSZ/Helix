@@ -52,7 +52,11 @@ func (m *Manager) loadFromDir(dir, source string) {
 	}
 
 	for _, entry := range entries {
+		// 跳过非目录、隐藏目录、符号链接（防止目录外读取）
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 

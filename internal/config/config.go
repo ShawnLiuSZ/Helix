@@ -167,6 +167,11 @@ func DefaultConfig() *Config {
 }
 
 func homeDir() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		// 回退到当前目录（可能被恶意配置注入）
+		cwd, _ := os.Getwd()
+		return cwd
+	}
 	return home
 }

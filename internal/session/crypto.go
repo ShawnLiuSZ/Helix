@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 // Crypto 会话加密器（AES-256-GCM）
@@ -31,19 +32,25 @@ func NewCryptoWithKey(key string) *Crypto {
 }
 
 // deriveKey 派生加密密钥
+// 注意：此模块当前未被生产代码调用，会话实际明文存储。
+// 接线前必须改为：随机密钥 + Argon2id/scrypt + 随机 salt。
 func deriveKey() []byte {
-	// 从环境变量读取
+	// 从环境变量读取（推荐方式）
 	if envKey := os.Getenv("HELIX_ENCRYPTION_KEY"); envKey != "" {
 		hash := sha256.Sum256([]byte(envKey))
 		return hash[:]
 	}
 
-	// 默认密钥（基于主机名 + 用户）
-	hostname, _ := os.Hostname()
-	username := os.Getenv("USER")
-	seed := fmt.Sprintf("helix-session-%s-%s", hostname, username)
-	hash := sha256.Sum256([]byte(seed))
-	return hash[:]
+	// 未设置环境变量时生成随机密钥（每次启动不同，会话无法跨重启解密）
+	// 这是安全的默认行为，比用公开信息（hostname/username）好
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		// 极端回退：用时间戳 + PID（不安全，但比 panic 好）
+		seed := fmt.Sprintf("helix-session-%d-%d", time.Now().UnixNano(), os.Getpid())
+		hash := sha256.Sum256([]byte(seed))
+		return hash[:]
+	}
+	return key
 }
 
 // Encrypt 加密数据

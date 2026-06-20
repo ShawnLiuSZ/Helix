@@ -23,7 +23,7 @@ type Document struct {
 	ID       string            `json:"id"`
 	Content  string            `json:"content"`
 	Metadata map[string]string `json:"metadata,omitempty"`
-	Vector   []float64         `json:"-"`
+	Vector   []float64         `json:"vector,omitempty"`
 }
 
 // SearchResult 搜索结果
