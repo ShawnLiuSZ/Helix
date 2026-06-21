@@ -12,6 +12,7 @@ import (
 type Server struct {
 	addr   string
 	mux    *http.ServeMux
+	wsHub  *WSHub
 }
 
 // NewServer 创建 Dashboard 服务器
@@ -26,8 +27,9 @@ func NewServer(addr string) *Server {
 	}
 
 	s := &Server{
-		addr: addr,
-		mux:  http.NewServeMux(),
+		addr:  addr,
+		mux:   http.NewServeMux(),
+		wsHub: NewWSHub(),
 	}
 	s.routes()
 	return s
