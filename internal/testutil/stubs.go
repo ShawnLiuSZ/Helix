@@ -2,17 +2,20 @@ package testutil
 
 import (
 	"context"
+	"sync"
 
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
 )
 
 // StubProvider 测试用 Provider stub（返回预设数据）
 type StubProvider struct {
-	NameVal       string
-	ModelsVal     []provider.ModelInfo
-	CapsVal       provider.Capabilities
-	ChatFn        func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error)
-	chatCalls     []*provider.ChatRequest
+	NameVal   string
+	ModelsVal []provider.ModelInfo
+	CapsVal   provider.Capabilities
+	ChatFn    func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error)
+
+	mu        sync.Mutex
+	chatCalls []*provider.ChatRequest
 }
 
 func (s *StubProvider) Name() string                        { return s.NameVal }
@@ -23,7 +26,9 @@ func (s *StubProvider) Cost(modelID string, usage provider.Usage) provider.Cost 
 }
 
 func (s *StubProvider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+	s.mu.Lock()
 	s.chatCalls = append(s.chatCalls, req)
+	s.mu.Unlock()
 	if s.ChatFn != nil {
 		return s.ChatFn(ctx, req)
 	}
@@ -39,6 +44,8 @@ func (s *StubProvider) Stream(ctx context.Context, req *provider.ChatRequest) (<
 
 // ChatCallCount 返回 Chat 调用次数
 func (s *StubProvider) ChatCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return len(s.chatCalls)
 }
 

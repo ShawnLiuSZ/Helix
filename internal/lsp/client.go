@@ -212,11 +212,9 @@ func (c *Client) cancelPending(id int64) {
 	delete(c.pending, id)
 }
 
-// sendNotification 发送通知（无响应）
+// sendNotification 发送通知（无响应）。
+// 必须使用 LSP 的 Content-Length 分帧（与 call 一致），不能用裸换行——否则会打乱服务端解析。
 func (c *Client) sendNotification(method string, params any) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	notif := Notification{
 		JSONRPC: jsonrpcVersion,
 		Method:  method,
@@ -228,7 +226,11 @@ func (c *Client) sendNotification(method string, params any) {
 	}
 
 	data, _ := json.Marshal(notif)
-	data = append(data, '\n')
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
+	c.stdin.Write([]byte(header))
 	c.stdin.Write(data)
 }
 

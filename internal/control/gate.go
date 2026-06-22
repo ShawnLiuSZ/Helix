@@ -85,9 +85,10 @@ func (g *Gate) Check(toolName string, args map[string]any) (allowed bool, reason
 		return false, "requires approval"
 	}
 
-	// Auto 模式：放行但记录
+	// Auto 模式：白名单内的操作已在上面放行；其余（未白名单的 bash / 工作区外的写入）一律拒绝。
+	// H6 安全修复：不再无条件放行，否则 Auto 等同 Yolo。
 	if g.mode == ModeAuto {
-		return true, "auto-approved"
+		return false, "auto mode: not allowlisted"
 	}
 
 	return false, "blocked"

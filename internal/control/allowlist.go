@@ -3,6 +3,7 @@ package control
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // Allowlist 文件/命令白名单
@@ -137,54 +138,233 @@ func (a *Allowlist) isShellAllowed(args map[string]any) bool {
 	return true
 }
 
-// splitShellCommand 按 shell 分隔符分割命令
+// splitShellCommand 按 shell 分隔符把命令拆成"会被执行的命令段"，并保持 quote-aware：
+//   - 单引号内：全部字面量，不分词、不展开（bash 语义）。
+//   - 双引号内：分隔符（; && || | & > >> < ( )）是字面量；但命令替换 $(...) / 反引号仍然生效，
+//     其内部命令会被作为独立段提取出来校验。
+//   - 引号外：所有分隔符生效；命令替换内部命令同样被提取。
+// 这样既能放行带标点的合法命令（git commit -m "a; b"），又不漏掉任何 bash 真正会执行的命令。
 func splitShellCommand(cmd string) []string {
-	// 按 ;, &&, ||, |, $(), 反引号 分割
-	separators := []string{";", "&&", "||", "|"}
-	result := []string{cmd}
-
-	for _, sep := range separators {
-		var next []string
-		for _, s := range result {
-			parts := strings.Split(s, sep)
-			next = append(next, parts...)
+	var segments []string
+	var cur strings.Builder
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			segments = append(segments, s)
 		}
-		result = next
+		cur.Reset()
+	}
+	// addSub: 把命令替换的内部内容递归拆分后加入段列表（不终止外层命令）。
+	addSub := func(inner string) {
+		segments = append(segments, splitShellCommand(inner)...)
 	}
 
-	// 过滤空段
-	var filtered []string
-	for _, s := range result {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			filtered = append(filtered, s)
+	i, n := 0, len(cmd)
+	for i < n {
+		c := cmd[i]
+		switch {
+		case c == '\'':
+			// 单引号：字面量，原样保留到当前段
+			j := i + 1
+			for j < n && cmd[j] != '\'' {
+				j++
+			}
+			end := j + 1
+			if end > n {
+				end = n
+			}
+			cur.WriteString(cmd[i:end])
+			i = end
+
+		case c == '"':
+			// 双引号：字面量，但 $(...) / 反引号 仍是命令替换
+			cur.WriteByte('"')
+			i++
+			for i < n && cmd[i] != '"' {
+				if cmd[i] == '\\' && i+1 < n {
+					cur.WriteByte(cmd[i])
+					cur.WriteByte(cmd[i+1])
+					i += 2
+					continue
+				}
+				if cmd[i] == '$' && i+1 < n && cmd[i+1] == '(' {
+					inner, next := readBalancedParen(cmd, i+2)
+					addSub(inner)
+					i = next
+					continue
+				}
+				if cmd[i] == '`' {
+					inner, next := readBacktick(cmd, i+1)
+					addSub(inner)
+					i = next
+					continue
+				}
+				cur.WriteByte(cmd[i])
+				i++
+			}
+			if i < n {
+				cur.WriteByte('"')
+				i++
+			}
+
+		case c == '\\':
+			// 引号外的转义：下一个字符是字面量
+			if i+1 < n {
+				cur.WriteByte(cmd[i+1])
+				i += 2
+			} else {
+				i++
+			}
+
+		case c == '$' && i+1 < n && cmd[i+1] == '(':
+			inner, next := readBalancedParen(cmd, i+2)
+			addSub(inner)
+			i = next
+
+		case c == '`':
+			inner, next := readBacktick(cmd, i+1)
+			addSub(inner)
+			i = next
+
+		default:
+			if sepLen := matchSeparator(cmd, i); sepLen > 0 {
+				flush()
+				i += sepLen
+				continue
+			}
+			cur.WriteByte(c)
+			i++
 		}
 	}
-	return filtered
+	flush()
+	return segments
 }
 
-// extractArgv0 从命令段中提取第一个参数（命令名）
-func extractArgv0(segment string) string {
-	segment = strings.TrimSpace(segment)
-	if segment == "" {
-		return ""
-	}
-
-	// 跳过环境变量赋值 (KEY=VALUE)
-	for strings.Contains(segment, "=") && !strings.HasPrefix(segment, "=") {
-		// 找到第一个空格，跳过 KEY=VALUE
-		spIdx := strings.Index(segment, " ")
-		if spIdx < 0 {
-			return ""
+// matchSeparator 返回 s[i] 处的分隔符长度（0 表示非分隔符）。两字符分隔符优先匹配。
+func matchSeparator(s string, i int) int {
+	if i+1 < len(s) {
+		switch s[i : i+2] {
+		case "&&", "||", ">>":
+			return 2
 		}
-		segment = strings.TrimSpace(segment[spIdx+1:])
 	}
+	switch s[i] {
+	case '\n', ';', '|', '&', '>', '<', '(', ')':
+		return 1
+	}
+	return 0
+}
 
-	// 取第一个空格前的部分
-	if idx := strings.IndexAny(segment, " \t"); idx >= 0 {
-		return segment[:idx]
+// readBalancedParen 从 start 处读取平衡括号内的内容（用于 $(...)），返回内部内容与闭括号之后的位置。
+func readBalancedParen(s string, start int) (inner string, next int) {
+	depth := 1
+	var b strings.Builder
+	i := start
+	for i < len(s) {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return b.String(), i + 1
+			}
+		}
+		b.WriteByte(s[i])
+		i++
 	}
-	return segment
+	return b.String(), i
+}
+
+// readBacktick 读取反引号内的内容，返回内部内容与闭反引号之后的位置。
+func readBacktick(s string, start int) (inner string, next int) {
+	i := start
+	var b strings.Builder
+	for i < len(s) && s[i] != '`' {
+		b.WriteByte(s[i])
+		i++
+	}
+	if i < len(s) {
+		i++ // 跳过闭反引号
+	}
+	return b.String(), i
+}
+
+// extractArgv0 从命令段中提取第一个会被执行的命令名（quote-aware）：
+// 跳过前置的环境变量赋值（IDENT=...），返回首个非赋值 token，并剥除整体包裹的引号。
+func extractArgv0(segment string) string {
+	for _, tok := range tokenizeWords(segment) {
+		if isEnvAssignment(tok) {
+			continue
+		}
+		return stripWrappingQuotes(tok)
+	}
+	return ""
+}
+
+// tokenizeWords 按"引号外的空白"切分 token（引号内的空白保留在同一 token 内）。
+func tokenizeWords(s string) []string {
+	var tokens []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	flush := func() {
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inSingle:
+			cur.WriteByte(c)
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			cur.WriteByte(c)
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			cur.WriteByte(c)
+			inSingle = true
+		case c == '"':
+			cur.WriteByte(c)
+			inDouble = true
+		case c == ' ' || c == '\t':
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
+	return tokens
+}
+
+// isEnvAssignment 判断 token 是否为环境变量赋值前缀（IDENT=...，IDENT 为合法 shell 标识符）。
+func isEnvAssignment(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i, r := range tok[:eq] {
+		if r == '_' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// stripWrappingQuotes 剥除整体包裹的成对引号（"git" → git），否则原样返回。
+func stripWrappingQuotes(tok string) string {
+	if len(tok) >= 2 {
+		first, last := tok[0], tok[len(tok)-1]
+		if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+			return tok[1 : len(tok)-1]
+		}
+	}
+	return tok
 }
 
 // isArgv0Allowed 检查 argv[0] 是否在白名单中（精确匹配）

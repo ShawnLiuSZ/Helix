@@ -73,7 +73,7 @@ func main() {
 	case "chat", "tui":
 		chatCommand()
 	case "dashboard":
-		dashboardCommand()
+		dashboardCommand(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		fmt.Fprintln(os.Stderr, "Available commands: run, setup, chat, dashboard")
@@ -123,13 +123,9 @@ func runCommand(args []string) {
 	tools := tool.NewRegistry()
 	tools.RegisterDefaults()
 
-	// 注入命令沙箱权限检查器
+	// 注入命令沙箱与文件护栏权限检查器
 	perm := control.NewPermission(control.ModeAuto)
-	if bashTool, ok := tools.Get("bash"); ok {
-		if bt, ok := bashTool.(*tool.BashTool); ok {
-			bt.SetPermissionChecker(perm)
-		}
-	}
+	configureToolPermissions(tools, perm)
 
 	// 创建 Agent
 	ag := agent.New(p, tools)
@@ -199,6 +195,47 @@ func selectProvider(cfg *config.Config) (*config.ProviderConfig, error) {
 	return cfg.GetProvider(name)
 }
 
+// configureToolPermissions 给文件工具与 bash 接入权限护栏（C2），
+// 并按"工作区内放行"模型配置 Auto 模式的默认白名单（H6）。
+func configureToolPermissions(tools *tool.Registry, perm *control.Permission) {
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		cwd = "."
+	}
+
+	// 工作区根：文件读写限制在 cwd 之内；Auto 模式下区内写入放行、区外拒绝。
+	perm.Allowlist().SetAllowedPaths([]string{cwd})
+	// Auto 模式下默认可用的安全 shell 命令；其余需用户显式加入或切到 review 模式。
+	perm.Allowlist().SetShellCommands([]string{
+		"ls", "cat", "head", "tail", "grep", "find",
+		"pwd", "echo", "wc", "git", "go", "which",
+	})
+
+	if t, ok := tools.Get("bash"); ok {
+		if bt, ok := t.(*tool.BashTool); ok {
+			bt.SetPermissionChecker(perm)
+		}
+	}
+	if t, ok := tools.Get("read_file"); ok {
+		if ft, ok := t.(*tool.ReadFileTool); ok {
+			ft.SetRoot(cwd)
+			ft.SetPermissionChecker(perm)
+		}
+	}
+	if t, ok := tools.Get("write_file"); ok {
+		if ft, ok := t.(*tool.WriteFileTool); ok {
+			ft.SetRoot(cwd)
+			ft.SetPermissionChecker(perm)
+		}
+	}
+	if t, ok := tools.Get("edit_file"); ok {
+		if ft, ok := t.(*tool.EditFileTool); ok {
+			ft.SetRoot(cwd)
+			ft.SetPermissionChecker(perm)
+		}
+	}
+}
+
 func selectModel(provCfg *config.ProviderConfig) string {
 	if *flagModel != "" {
 		return *flagModel
@@ -265,16 +302,23 @@ func chatCommand() {
 		os.Exit(1)
 	}
 
+	// 创建所有 provider（用于 /model 跨 provider 切换）
+	allProviders := []provider.Provider{p}
+	for _, pc := range cfg.Providers {
+		if pc.Name == provCfg.Name {
+			continue // 跳过当前 provider（已经创建）
+		}
+		if op, err := createProvider(&pc); err == nil {
+			allProviders = append(allProviders, op)
+		}
+	}
+
 	tools := tool.NewRegistry()
 	tools.RegisterDefaults()
 
-	// 注入命令沙箱权限检查器
+	// 注入命令沙箱与文件护栏权限检查器
 	perm := control.NewPermission(control.ModeAuto)
-	if bashTool, ok := tools.Get("bash"); ok {
-		if bt, ok := bashTool.(*tool.BashTool); ok {
-			bt.SetPermissionChecker(perm)
-		}
-	}
+	configureToolPermissions(tools, perm)
 
 	// 初始化会话管理器
 	home, _ := os.UserHomeDir()
@@ -287,6 +331,7 @@ func chatCommand() {
 	// 启动 TUI
 	app := ui.NewApp(p, tools)
 	app.SetModel(selectModel(provCfg))
+	app.SetProviders(allProviders)
 
 	if sessionMgr != nil {
 		app.SetSessionManager(sessionMgr)
@@ -294,6 +339,7 @@ func chatCommand() {
 		// 如果指定了 --session，恢复该会话
 		if *flagSession != "" {
 			if sess, ok := sessionMgr.Get(*flagSession); ok {
+				sessionMgr.SetActive(*flagSession)
 				app.RestoreSession(sess)
 			} else {
 				fmt.Fprintf(os.Stderr, "Warning: session %q not found, starting new session\n", *flagSession)
@@ -310,7 +356,10 @@ func chatCommand() {
 }
 
 func readStdin() string {
-	stat, _ := os.Stdin.Stat()
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return ""
+	}
 	if (stat.Mode() & os.ModeCharDevice) != 0 {
 		return ""
 	}
@@ -398,10 +447,10 @@ func (p *envProvider) EnvForSubprocess() []string {
 }
 
 // dashboardCommand 启动 Web Dashboard
-func dashboardCommand() {
+func dashboardCommand(args []string) {
 	addr := ":8080"
-	if len(os.Args) > 2 {
-		addr = os.Args[2]
+	if len(args) > 0 {
+		addr = args[0]
 	}
 
 	server := dashboard.NewServer(addr)
