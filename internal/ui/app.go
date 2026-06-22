@@ -196,8 +196,15 @@ func (a *App) SetProgram(p *tea.Program)               { a.program = p }
 
 // saveSession 将新消息保存到活动会话
 func (a *App) saveSession() {
-	if a.sessionMgr == nil || a.activeSess == nil {
+	if a.sessionMgr == nil {
 		return
+	}
+	// 懒创建默认会话：首次启动未指定 --session 时也能持久化，且不会在每次启动时产生空会话文件。
+	if a.activeSess == nil {
+		if len(a.messages) == 0 {
+			return
+		}
+		a.activeSess = a.sessionMgr.Create("default", a.model, a.provider.Name())
 	}
 	// 只保存新消息（上次保存之后的）
 	for i := a.savedMsgCount; i < len(a.messages); i++ {
@@ -473,6 +480,7 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/quit", "/exit":
+		a.saveSession()
 		a.quitting = true
 		return a, tea.Quit
 

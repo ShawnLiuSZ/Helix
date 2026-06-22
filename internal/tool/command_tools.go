@@ -65,6 +65,13 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 	cmd := exec.CommandContext(bashCtx, "bash", "-c", command)
 	cmd.Env = EnvForSubprocess()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // 创建进程组
+	// ctx 取消/超时时杀整个进程组（负 PID），而非仅组长，回收后台子进程，避免孤儿与 FD 泄漏。
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 
 	// 使用 Pipe 限制输出大小
 	stdout, err := cmd.StdoutPipe()
@@ -81,21 +88,23 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 	limitedReader := io.LimitReader(stdout, maxOutputSize)
 	output, _ := io.ReadAll(limitedReader)
 
+	// 输出超限：立即杀掉整个进程组，避免子进程写满管道阻塞导致 Wait 挂到超时。
+	truncated := len(output) >= maxOutputSize
+	if truncated && cmd.Process != nil {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
 	// 等待命令完成
 	waitErr := cmd.Wait()
 
-	// 如果输出超限，添加提示
-	if len(output) >= maxOutputSize {
+	if truncated {
 		output = append(output, []byte("\n... (output truncated at 1MB)")...)
 	}
 
 	result := &Result{Content: string(output)}
-	if waitErr != nil {
-		if len(output) > 0 {
-			result.Content = string(output)
-		}
+	// 因截断而主动 kill 导致的 waitErr 是预期的，不作为错误上报。
+	if waitErr != nil && !truncated {
 		result.Error = waitErr.Error()
-		return result, nil
 	}
 
 	return result, nil

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -119,8 +120,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	wsHandler := websocket.Handler(func(ws *websocket.Conn) {
 		defer ws.Close()
 
-		// 设置读写 deadline
-		ws.SetReadDeadline(time.Now().Add(60 * time.Second))
 		ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
 		client := &WSClient{
@@ -131,12 +130,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		hub.register <- client
 
-		// 读循环（检测断开）
+		// 读循环（仅用于检测断开）。
+		// 每次收到消息后刷新读 deadline，避免健康连接被一次性 60s deadline 误杀（R2）。
 		go func() {
 			defer func() {
 				hub.unregister <- client
 			}()
 			for {
+				ws.SetReadDeadline(time.Now().Add(120 * time.Second))
 				var msg []byte
 				err := websocket.Message.Receive(ws, &msg)
 				if err != nil {
@@ -159,19 +160,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	wsHandler.ServeHTTP(w, r)
 }
 
-// isAllowedOrigin 检查 Origin 是否允许
+// isAllowedOrigin 检查 Origin 是否允许（按精确 host 匹配，防止前缀绕过 CSWSH）。
 func (s *Server) isAllowedOrigin(origin string) bool {
-	// 允许 localhost 和 127.0.0.1
-	allowed := []string{
-		"http://localhost",
-		"http://127.0.0.1",
-		"https://localhost",
-		"https://127.0.0.1",
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
 	}
-	for _, a := range allowed {
-		if len(origin) >= len(a) && origin[:len(a)] == a {
-			return true
-		}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return true
 	}
 	return false
 }

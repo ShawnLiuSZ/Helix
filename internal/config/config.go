@@ -101,9 +101,10 @@ func Load(path string) (*Config, error) {
 // LoadDefault 按优先级查找并加载配置
 // 优先级: CLI flags > ./helix.toml > ~/.helix/config.toml > 内置默认
 func LoadDefault() (*Config, error) {
-	paths := []string{
-		"./helix.toml",
-		filepath.Join(homeDir(), ".helix", "config.toml"),
+	paths := []string{"./helix.toml"}
+	// 仅当 HOME 可用时才纳入用户级配置路径；否则跳过，避免退化为 cwd 相对路径被恶意配置注入。
+	if home, ok := homeDir(); ok {
+		paths = append(paths, filepath.Join(home, ".helix", "config.toml"))
 	}
 
 	for _, p := range paths {
@@ -166,12 +167,11 @@ func DefaultConfig() *Config {
 	}
 }
 
-func homeDir() string {
+// homeDir 返回用户主目录；不可用时返回 ("", false)，调用方应跳过用户级路径而非回退到 cwd。
+func homeDir() (string, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		// 回退到当前目录（可能被恶意配置注入）
-		cwd, _ := os.Getwd()
-		return cwd
+		return "", false
 	}
-	return home
+	return home, true
 }

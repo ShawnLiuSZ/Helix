@@ -10,12 +10,16 @@ import (
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
+// maxSubAgentDepth 子 Agent 递归 spawn 的最大深度，防止成本/栈爆炸。
+const maxSubAgentDepth = 3
+
 // SubAgent 子 Agent
 type SubAgent struct {
 	ID       string
 	Name     string
 	Role     string
 	ParentID string
+	Depth    int
 
 	agent    *Agent
 	status   SubAgentStatus
@@ -93,6 +97,24 @@ func (m *SubAgentManager) Spawn(name, role string, p provider.Provider, registry
 	return sa
 }
 
+// SpawnChild 创建一个子级 Agent，设置 ParentID/Depth 并校验递归深度。
+// 超过 maxSubAgentDepth 时返回错误且不注册，防止子 agent 无限递归 spawn。
+func (m *SubAgentManager) SpawnChild(parent *SubAgent, name, role string, p provider.Provider, registry *tool.Registry) (*SubAgent, error) {
+	depth := parent.Depth + 1
+	if depth > maxSubAgentDepth {
+		return nil, fmt.Errorf("max sub-agent depth %d exceeded", maxSubAgentDepth)
+	}
+
+	sa := m.Spawn(name, role, p, registry)
+
+	m.mu.Lock()
+	sa.ParentID = parent.ID
+	sa.Depth = depth
+	m.mu.Unlock()
+
+	return sa, nil
+}
+
 // Get 获取子 Agent
 func (m *SubAgentManager) Get(id string) (*SubAgent, bool) {
 	m.mu.RLock()
@@ -137,10 +159,12 @@ func (m *SubAgentManager) CancelAll() {
 	}
 }
 
-// Run 启动子 Agent 执行任务
+// Run 启动子 Agent 执行任务。
+// 一次性：仅在 Pending 状态启动；完成/失败/取消/运行中再次调用都是 no-op，
+// 避免对已关闭的 done channel 二次 close 而 panic（H11）。
 func (sa *SubAgent) Run(task string) {
 	sa.mu.Lock()
-	if sa.status == StatusRunning {
+	if sa.status != StatusPending {
 		sa.mu.Unlock()
 		return
 	}

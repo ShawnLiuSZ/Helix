@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -17,22 +18,34 @@ type Server struct {
 
 // NewServer 创建 Dashboard 服务器
 func NewServer(addr string) *Server {
-	// 默认绑定 127.0.0.1（安全）
-	if addr == "" || addr == ":8080" {
-		addr = "127.0.0.1:8080"
-	}
-	// 如果只指定了端口（如 ":9090"），补上 127.0.0.1
-	if strings.HasPrefix(addr, ":") {
-		addr = "127.0.0.1" + addr
-	}
-
 	s := &Server{
-		addr:  addr,
+		addr:  loopbackAddr(addr),
 		mux:   http.NewServeMux(),
 		wsHub: NewWSHub(),
 	}
 	s.routes()
 	return s
+}
+
+// loopbackAddr 强制将监听地址绑定到回环网卡（dashboard 无鉴权，禁止暴露到全网卡）。
+// 非回环 host（如 0.0.0.0、局域网 IP）会被改回 127.0.0.1，仅保留端口。
+func loopbackAddr(addr string) string {
+	if addr == "" {
+		return "127.0.0.1:8080"
+	}
+	if strings.HasPrefix(addr, ":") {
+		return "127.0.0.1" + addr
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "127.0.0.1:8080"
+	}
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return net.JoinHostPort(host, port)
+	default:
+		return net.JoinHostPort("127.0.0.1", port)
+	}
 }
 
 // routes 注册路由

@@ -123,13 +123,9 @@ func runCommand(args []string) {
 	tools := tool.NewRegistry()
 	tools.RegisterDefaults()
 
-	// 注入命令沙箱权限检查器
+	// 注入命令沙箱与文件护栏权限检查器
 	perm := control.NewPermission(control.ModeAuto)
-	if bashTool, ok := tools.Get("bash"); ok {
-		if bt, ok := bashTool.(*tool.BashTool); ok {
-			bt.SetPermissionChecker(perm)
-		}
-	}
+	configureToolPermissions(tools, perm)
 
 	// 创建 Agent
 	ag := agent.New(p, tools)
@@ -197,6 +193,47 @@ func selectProvider(cfg *config.Config) (*config.ProviderConfig, error) {
 		name = cfg.Providers[0].Name
 	}
 	return cfg.GetProvider(name)
+}
+
+// configureToolPermissions 给文件工具与 bash 接入权限护栏（C2），
+// 并按"工作区内放行"模型配置 Auto 模式的默认白名单（H6）。
+func configureToolPermissions(tools *tool.Registry, perm *control.Permission) {
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		cwd = "."
+	}
+
+	// 工作区根：文件读写限制在 cwd 之内；Auto 模式下区内写入放行、区外拒绝。
+	perm.Allowlist().SetAllowedPaths([]string{cwd})
+	// Auto 模式下默认可用的安全 shell 命令；其余需用户显式加入或切到 review 模式。
+	perm.Allowlist().SetShellCommands([]string{
+		"ls", "cat", "head", "tail", "grep", "find",
+		"pwd", "echo", "wc", "git", "go", "which",
+	})
+
+	if t, ok := tools.Get("bash"); ok {
+		if bt, ok := t.(*tool.BashTool); ok {
+			bt.SetPermissionChecker(perm)
+		}
+	}
+	if t, ok := tools.Get("read_file"); ok {
+		if ft, ok := t.(*tool.ReadFileTool); ok {
+			ft.SetRoot(cwd)
+			ft.SetPermissionChecker(perm)
+		}
+	}
+	if t, ok := tools.Get("write_file"); ok {
+		if ft, ok := t.(*tool.WriteFileTool); ok {
+			ft.SetRoot(cwd)
+			ft.SetPermissionChecker(perm)
+		}
+	}
+	if t, ok := tools.Get("edit_file"); ok {
+		if ft, ok := t.(*tool.EditFileTool); ok {
+			ft.SetRoot(cwd)
+			ft.SetPermissionChecker(perm)
+		}
+	}
 }
 
 func selectModel(provCfg *config.ProviderConfig) string {
@@ -268,13 +305,9 @@ func chatCommand() {
 	tools := tool.NewRegistry()
 	tools.RegisterDefaults()
 
-	// 注入命令沙箱权限检查器
+	// 注入命令沙箱与文件护栏权限检查器
 	perm := control.NewPermission(control.ModeAuto)
-	if bashTool, ok := tools.Get("bash"); ok {
-		if bt, ok := bashTool.(*tool.BashTool); ok {
-			bt.SetPermissionChecker(perm)
-		}
-	}
+	configureToolPermissions(tools, perm)
 
 	// 初始化会话管理器
 	home, _ := os.UserHomeDir()

@@ -50,13 +50,11 @@ func TestGate_ReviewMode_ReadAllowed(t *testing.T) {
 }
 
 func TestGate_AutoMode(t *testing.T) {
+	// H6 安全修复：Auto 模式不再无条件放行；白名单外的写入被拒绝
 	gate := NewGate(ModeAuto, NewAllowlist())
-	allowed, reason := gate.Check("write_file", map[string]any{"path": "/project/main.go"})
-	if !allowed {
-		t.Errorf("auto mode should allow writes: %s", reason)
-	}
-	if reason != "auto-approved" {
-		t.Errorf("reason = %q", reason)
+	allowed, _ := gate.Check("write_file", map[string]any{"path": "/project/main.go"})
+	if allowed {
+		t.Error("auto mode must not blanket-approve non-allowlisted writes (H6)")
 	}
 }
 

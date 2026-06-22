@@ -138,9 +138,10 @@ func (a *Allowlist) isShellAllowed(args map[string]any) bool {
 }
 
 // splitShellCommand 按 shell 分隔符分割命令
+// 包含命令链接（; && || |）、命令替换（$( ` )）、重定向（> >> <）、后台（&）、子 shell（( )）与换行。
+// 分得更细只会让每段的 argv[0] 都被校验（偏保守、默认拒绝），不会漏掉夹带的命令。
 func splitShellCommand(cmd string) []string {
-	// 按 ;, &&, ||, |, $(), 反引号 分割
-	separators := []string{";", "&&", "||", "|"}
+	separators := []string{"\n", ";", "&&", "||", "|", "$(", ">>", ">", "<", "&", "(", ")", "`"}
 	result := []string{cmd}
 
 	for _, sep := range separators {
