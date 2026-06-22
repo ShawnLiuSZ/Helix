@@ -36,6 +36,37 @@ func TestSubAgent_Run_OnceOnly(t *testing.T) {
 	}
 }
 
+// H11 加固：所有创建都走单一私有入口 spawn，深度由它原子设置并强制兜底——
+// 任何路径都无法创建深度超过 maxSubAgentDepth 的子 agent。
+func TestSubAgentManager_Spawn_DepthGuard(t *testing.T) {
+	p := testutil.NewStubProvider(nil)
+	r := tool.NewRegistry()
+	m := NewSubAgentManager()
+
+	// 超限深度：兜底返回 nil，且不注册。
+	if sa := m.spawn("x", "y", "parent", maxSubAgentDepth+1, p, r); sa != nil {
+		t.Error("spawn beyond maxSubAgentDepth must return nil")
+	}
+	if len(m.List()) != 0 {
+		t.Errorf("over-depth spawn must not register a sub-agent, got %d", len(m.List()))
+	}
+
+	// 合法深度：创建成功并原子设置 ParentID/Depth。
+	sa := m.spawn("c", "role", "sub_99", maxSubAgentDepth, p, r)
+	if sa == nil {
+		t.Fatal("valid-depth spawn returned nil")
+	}
+	if sa.Depth != maxSubAgentDepth || sa.ParentID != "sub_99" {
+		t.Errorf("spawn set Depth=%d ParentID=%q, want %d/%q", sa.Depth, sa.ParentID, maxSubAgentDepth, "sub_99")
+	}
+
+	// 顶层 Spawn 始终是 depth 0、无父。
+	root := m.Spawn("root", "role", p, r)
+	if root.Depth != 0 || root.ParentID != "" {
+		t.Errorf("Spawn root Depth=%d ParentID=%q, want 0/empty", root.Depth, root.ParentID)
+	}
+}
+
 // H11 第二半：SpawnChild 必须设置 ParentID/Depth 并限制递归深度。
 func TestSubAgentManager_SpawnChild_DepthLimit(t *testing.T) {
 	p := testutil.NewStubProvider(nil)

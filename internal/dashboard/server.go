@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -33,9 +32,8 @@ func loopbackAddr(addr string) string {
 	if addr == "" {
 		return "127.0.0.1:8080"
 	}
-	if strings.HasPrefix(addr, ":") {
-		return "127.0.0.1" + addr
-	}
+	// 统一用 SplitHostPort 解析（含 ":8080"、"[::1]:8080" 等形式）。
+	// 解析失败（如裸 IPv6 "::1" 无端口、格式异常）一律回退到默认回环地址，避免拼出畸形地址。
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return "127.0.0.1:8080"
@@ -44,6 +42,7 @@ func loopbackAddr(addr string) string {
 	case "localhost", "127.0.0.1", "::1":
 		return net.JoinHostPort(host, port)
 	default:
+		// 空 host（":8080"）或任何非回环 host（0.0.0.0、局域网 IP、:: 等）→ 强制回环。
 		return net.JoinHostPort("127.0.0.1", port)
 	}
 }

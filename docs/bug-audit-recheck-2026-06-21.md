@@ -215,4 +215,47 @@
 
 ---
 
+## 9. 二次独立验证 + 残留修复（2026-06-22）
+
+> 对第 8 节 `b5e3dcd` 所声称的修复做**独立对抗性复验**（不信任文档，逐项核对当前源码 + 构造新的绕过/复现，而非仅重跑既有绿测——前两轮正是"绿测但缺陷仍在"）。按 7 个 Go 包并行派发验证 agent，高影响项主线直核。
+
+### 验证结论：第 8 节 10 项声称修复**全部成立**（首个"干净"轮）
+
+| 项 | 声称 | 复验 | 对抗证据 |
+|----|------|------|----------|
+| C1 | 分隔符补全 | ✅ 成立 | `$()`/反引号/`>`/`>>`/`\n`/`&`/`\|&`/进程替换 `<()`/env 前缀 均拒；合法命令放行 |
+| H6 | Auto 默认拒绝 | ✅ 成立 | 空白名单拒 `python3 -c`/`chmod && exec`/`npm install`；旧错误断言测试已改写 |
+| C2 | 文件工具接护栏 | ✅ 成立 | `/etc/passwd`、`../../`、符号链接逃逸全拒；**三个工具在两处 main.go 均已接线** |
+| H11 | Run 一次性 + 深度限制 | ✅ 成立 | 还原守卫即复现 panic；深度 4 被拒 |
+| R1 | LSP Content-Length 分帧 | ✅ 成立 | 逐字节帧断言通过；无裸换行 |
+| R2 | 精确 host + 读 deadline 刷新 | ✅ 成立 | 前缀绕过被堵；deadline 在读循环内刷新 |
+| H3 | 懒建会话 + /quit 落盘 | ✅ 成立 | 首次运行→/quit 落盘可追踪；空会话防护真实 |
+| M3 | 杀进程组 | ✅ 成立 | `yes`/`cat /dev/zero` ~7ms 返回（非 60s）；组被回收 |
+| M9 | 强制回环 | ✅ 成立 | `0.0.0.0`/局域网 IP → `127.0.0.1`，端口保留 |
+| config-home | 无 cwd 回退 | ✅ 成立 | HOME 空 → 跳过用户配置，无 cwd 相对路径 |
+
+### 本轮修复的残留（验证中新发现，均非第 8 节的 claim）
+
+按 TDD（先写复现测试→红→最小修复→绿）逐项修复。`go build`/`go vet`/`go test ./...`（16 包）全绿；`-race` 在 control/agent/dashboard 全绿。
+
+| 项 | 问题 | 修复 | 文件 |
+|----|------|------|------|
+| **R2 空 Origin 绕过** | `origin != "" && …` 让缺失/空 Origin 头跳过校验（非浏览器客户端绕过 CSWSH 防护） | 改为默认拒绝：`!isAllowedOrigin(origin)`（空串 url.Parse 后 scheme 为空 → 拒） | `dashboard/websocket.go` |
+| **C1 引号内过度拦截** | 分词器对引号无感知，`git commit -m "a; b"` 被错误拒绝（核心日常工作流） | 重写 `splitShellCommand` 为 quote-aware（单引号全字面、双引号内仅 `$()`/反引号 仍展开、引号外全分隔符生效）；`extractArgv0` 改 quote-aware 分词 + 仅跳过真正的 `IDENT=` env 前缀 | `control/allowlist.go` |
+| **H11 Spawn 加固** | 导出的 `Spawn` 不带深度、SpawnChild 创建后二次加锁补字段；深度可被绕过的隐患（当前无生产调用方） | 统一私有创建入口 `spawn(parentID, depth)`：原子设置 + 硬性深度兜底（越界返回 nil 不注册）；`Spawn`=顶层(depth0)、`SpawnChild`=深度+1 | `agent/subagent.go` |
+| **M9 `::1` 边界** | `loopbackAddr("::1")`（裸 IPv6 无端口）拼出畸形 `127.0.0.1::1` | 统一走 `net.SplitHostPort`，解析失败回退默认回环 | `dashboard/server.go` |
+
+新增/扩充复现测试：`control/allowlist_quote_test.go`、`dashboard/websocket_origin_test.go`（空 Origin handler 用例）、`dashboard/loopback_test.go`（IPv6 用例）、`agent/subagent_h11_test.go`（创建入口深度兜底）。
+
+### 本轮刻意不做（含对 bundle 项的判断）
+
+- **write_file/edit_file 0644→0600（否决）**：0600（仅属主可读）对**项目源码文件**是错误的——编码 agent 写出的是用户项目文件（需被构建/服务/协作者读取），应按常规权限（`os.WriteFile` 的 0644 已受 umask 约束，等同普通编辑器）。M5 的 0600 仅针对**含对话历史的会话文件**（敏感），不应推广到一般工作区文件。**故不改。**
+- **WebSocket ping/pong 保活（推迟）**：前端 `static/app.js` **根本未使用 WebSocket**（WS server 目前无消费方），且 `golang.org/x/net/websocket` 不暴露 ping/pong 控制帧。保活应在真正接入 WS 客户端时配套客户端心跳一并设计，当前属空功能打磨，推迟。
+- **C1 黑名单子串过度拦截（已知）**：`blockedShellPatterns` 用裸子串匹配 `curl`/`wget` 等，会误拒 `git commit -m "improve curl"` 之类。属纵深防御层，改其语义有削弱安全网风险，本轮未动（标点类过度拦截已由 quote-aware 分词解决）。
+- **H11 扁平递归（架构层、不可达）**：经 `Spawn`(depth0) 反复创建"伪子级"在深度维度仍不可计（深度限制只约束 SpawnChild 血缘）。彻底封堵需能力式 spawn 运行时改造；当前零调用方，文档标注即可。
+- 第 8 节原列"未做"项（M9 鉴权 / crypto KDF / H8 ctx 透传 / H1 语义 / dashboard 死代码 goroutine）本轮同样未触及。
+
+---
+
 *复查生成: 2026-06-21 ｜ 方法: 8 路并行子系统审计 + 对抗性复现 + 高影响项主线直核 ｜ 修复执行: TDD 逐项修复，见第 8 节*
+*二次独立验证 + 残留修复: 2026-06-22 ｜ 方法: 7 包并行对抗验证 + 主线直核；残留项 TDD 修复，见第 9 节*
