@@ -167,15 +167,21 @@ func (s *TavilySearch) Search(ctx context.Context, query string, limit int) ([]S
 	}
 
 	reqBody := map[string]any{
-		"api_key": s.apiKey,
-		"query":   query,
+		"query":       query,
 		"max_results": limit,
 	}
 
 	jsonBody, _ := json.Marshal(reqBody)
 
-	resp, err := s.client.Post("https://api.tavily.com/search", "application/json",
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.tavily.com/search",
 		strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
 	}

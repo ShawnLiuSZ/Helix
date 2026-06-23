@@ -57,12 +57,26 @@ type CapConfig struct {
 	Voice       bool `toml:"voice"`
 }
 
-// PluginConfig MCP 插件配置
+// PluginConfig MCP 插件配置。
+// command 非空 → stdio 传输；url 非空 → HTTP/SSE 传输（url 优先）。
 type PluginConfig struct {
 	Name    string   `toml:"name"`
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
 	Env     []string `toml:"env"`
+	URL     string   `toml:"url"`
+}
+
+// Kind 返回插件的传输类型："sse" / "stdio" / ""（未配置）。
+func (p PluginConfig) Kind() string {
+	switch {
+	case p.URL != "":
+		return "sse"
+	case p.Command != "":
+		return "stdio"
+	default:
+		return ""
+	}
 }
 
 // PermissionConfig 权限配置

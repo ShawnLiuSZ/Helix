@@ -10,6 +10,7 @@ import (
 type Executor struct {
 	registry      *Registry
 	guards        []Guard
+	hooks         *HookManager
 	maxParallel   int
 	mu            sync.Mutex
 }
@@ -49,6 +50,13 @@ func (e *Executor) MaxParallel() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.maxParallel
+}
+
+// SetHooks 设置钩子管理器
+func (e *Executor) SetHooks(hm *HookManager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.hooks = hm
 }
 
 // AddGuard 添加执行守卫
@@ -157,11 +165,19 @@ func (e *Executor) executeOne(ctx context.Context, call Call) *Result {
 	e.mu.Lock()
 	guards := make([]Guard, len(e.guards))
 	copy(guards, e.guards)
+	hooks := e.hooks
 	e.mu.Unlock()
 
 	for _, g := range guards {
 		if err := g(call); err != nil {
 			return &Result{Error: fmt.Sprintf("guard: %s", err.Error())}
+		}
+	}
+
+	// Pre-hooks
+	if hooks != nil {
+		if err := hooks.RunPreHooks(ctx, call); err != nil {
+			return &Result{Error: fmt.Sprintf("pre-hook: %s", err.Error())}
 		}
 	}
 
@@ -175,6 +191,17 @@ func (e *Executor) executeOne(ctx context.Context, call Call) *Result {
 	result, err := tool.Execute(ctx, call.Args)
 	if err != nil {
 		return &Result{Error: err.Error()}
+	}
+
+	// Post-hooks
+	if hooks != nil {
+		if hookErr := hooks.RunPostHooks(ctx, call, result); hookErr != nil {
+			if result.Error != "" {
+				result.Error = result.Error + "; post-hook: " + hookErr.Error()
+			} else {
+				result.Error = fmt.Sprintf("post-hook: %s", hookErr.Error())
+			}
+		}
 	}
 
 	return result

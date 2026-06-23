@@ -148,7 +148,7 @@ func (c *RetryableHTTPClient) addJitter(delay time.Duration) time.Duration {
 		return delay
 	}
 	jitter := time.Duration(rand.Int63n(int64(delay) / 2))
-	return delay - jitter/2 + jitter/2
+	return delay - jitter
 }
 
 // parseRetryAfter 解析 Retry-After 头

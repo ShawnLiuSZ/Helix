@@ -200,17 +200,30 @@ func TestAddJitter(t *testing.T) {
 	c := NewRetryableClient(10 * time.Second)
 	base := 100 * time.Millisecond
 
-	// 多次运行验证 jitter 范围在 [base*0.75, base*1.25]
 	for i := 0; i < 100; i++ {
 		delay := c.addJitter(base)
-		if delay < base*3/4 || delay > base*5/4 {
-			t.Errorf("addJitter(%v) = %v, want between %v and %v", base, delay, base*3/4, base*5/4)
+		if delay < base/2 || delay > base {
+			t.Errorf("addJitter(%v) = %v, want between %v and %v", base, delay, base/2, base)
 		}
 	}
 
 	// 零值不应 panic
 	if c.addJitter(0) != 0 {
 		t.Error("addJitter(0) should return 0")
+	}
+}
+
+func TestAddJitter_VariesDelay(t *testing.T) {
+	c := NewRetryableClient(10 * time.Second)
+	base := 100 * time.Millisecond
+
+	results := make(map[time.Duration]bool)
+	for i := 0; i < 50; i++ {
+		results[c.addJitter(base)] = true
+	}
+
+	if len(results) <= 1 {
+		t.Errorf("addJitter returned same value %d times, expected variation", len(results))
 	}
 }
 
@@ -226,8 +239,8 @@ func TestRetryDelay_WithRetryAfter(t *testing.T) {
 	// 有 Retry-After 时使用指定值 + jitter
 	ra := 5 * time.Second
 	delay = c.retryDelay(1, &ra)
-	if delay < 3*time.Second || delay > 7*time.Second {
-		t.Errorf("retryDelay(1, 5s) = %v, want ~5s (±25%%)", delay)
+	if delay < 2*time.Second+500*time.Millisecond || delay > 5*time.Second {
+		t.Errorf("retryDelay(1, 5s) = %v, want between 2.5s and 5s", delay)
 	}
 }
 

@@ -183,7 +183,7 @@ func TestModelPickerShowsAllProvidersWithArrowMovement(t *testing.T) {
 	}
 
 	// 验证渲染输出包含模型选择器界面
-	rendered := app2.renderMessages(30)
+	rendered := app2.renderMessages(30, "")
 	if !strings.Contains(rendered, "▶ ds-v4-flash") {
 		t.Errorf("expected rendered picker to show arrow on first model, got:\n%s", rendered)
 	}
@@ -206,7 +206,7 @@ func TestModelPickerShowsAllProvidersWithArrowMovement(t *testing.T) {
 	if result.modelIdx != 1 {
 		t.Errorf("expected modelIdx 1 after down arrow, got %d", result.modelIdx)
 	}
-	rendered = result.renderMessages(30)
+	rendered = result.renderMessages(30, "")
 	if !strings.Contains(rendered, "▶ ds-v4-pro") {
 		t.Errorf("expected arrow on ds-v4-pro after down, got:\n%s", rendered)
 	}

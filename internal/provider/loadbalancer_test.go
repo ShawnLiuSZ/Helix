@@ -253,6 +253,69 @@ func TestLoadBalancerStream(t *testing.T) {
 	}
 }
 
+type costMockProvider struct {
+	mockProvider
+	modelCost ModelCost
+}
+
+func (m *costMockProvider) Models() []ModelInfo {
+	return []ModelInfo{{ID: "model-" + m.name, Name: "Model " + m.name, Cost: m.modelCost}}
+}
+
+func TestLoadBalancerCostOptimized(t *testing.T) {
+	t.Run("selects lowest cost provider", func(t *testing.T) {
+		providers := []Provider{
+			&costMockProvider{mockProvider: mockProvider{name: "cheap"}, modelCost: ModelCost{Input: 0.001, Output: 0.002}},
+			&costMockProvider{mockProvider: mockProvider{name: "expensive"}, modelCost: ModelCost{Input: 0.01, Output: 0.02}},
+		}
+		lb := NewLoadBalancer(providers, CostOptimized)
+
+		lb.RecordRequest("cheap", 50*time.Millisecond, false)
+		lb.RecordRequest("expensive", 50*time.Millisecond, false)
+
+		p := lb.Select()
+		if p.Name() != "cheap" {
+			t.Errorf("expected cheap provider, got %s", p.Name())
+		}
+	})
+
+	t.Run("filters low success rate", func(t *testing.T) {
+		providers := []Provider{
+			&costMockProvider{mockProvider: mockProvider{name: "reliable"}, modelCost: ModelCost{Input: 0.01, Output: 0.02}},
+			&costMockProvider{mockProvider: mockProvider{name: "flaky"}, modelCost: ModelCost{Input: 0.001, Output: 0.002}},
+		}
+		lb := NewLoadBalancer(providers, CostOptimized)
+
+		lb.RecordRequest("reliable", 50*time.Millisecond, false)
+		for i := 0; i < 9; i++ {
+			lb.RecordRequest("flaky", 10*time.Millisecond, true)
+		}
+		lb.RecordRequest("flaky", 10*time.Millisecond, false)
+
+		p := lb.Select()
+		if p.Name() != "reliable" {
+			t.Errorf("expected reliable provider, got %s", p.Name())
+		}
+	})
+
+	t.Run("falls back when all filtered", func(t *testing.T) {
+		providers := []Provider{
+			&costMockProvider{mockProvider: mockProvider{name: "bad"}, modelCost: ModelCost{Input: 0.001, Output: 0.002}},
+		}
+		lb := NewLoadBalancer(providers, CostOptimized)
+
+		for i := 0; i < 9; i++ {
+			lb.RecordRequest("bad", 10*time.Millisecond, true)
+		}
+		lb.RecordRequest("bad", 10*time.Millisecond, false)
+
+		p := lb.Select()
+		if p.Name() != "bad" {
+			t.Errorf("expected bad provider as fallback, got %s", p.Name())
+		}
+	})
+}
+
 func TestLoadBalancerConcurrent(t *testing.T) {
 	providers := []Provider{
 		&mockProvider{name: "p1"},

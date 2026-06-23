@@ -56,10 +56,12 @@ type EffortManager struct {
 func NewEffortManager() *EffortManager {
 	return &EffortManager{
 		level: EffortMedium,
+		// 步数是安全上限而非预期步数；真实编码任务（读-改-验证多轮）常超过 10 步，
+		// 过低会让 Agent 以 "max steps reached" 提前失败、丢失进度。成本另由预算机制兜底。
 		maxSteps: map[EffortLevel]int{
-			EffortLow:    5,
-			EffortMedium: 10,
-			EffortHigh:   20,
+			EffortLow:    10,
+			EffortMedium: 25,
+			EffortHigh:   50,
 		},
 		reasonEffort: map[EffortLevel]string{
 			EffortLow:    "low",

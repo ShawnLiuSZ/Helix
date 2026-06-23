@@ -33,7 +33,6 @@ func TestLoadEnvFiles_FlagPriority(t *testing.T) {
 }
 
 func TestExportEnvToSubprocess(t *testing.T) {
-	// 设置测试环境变量
 	t.Setenv("DEEPSEEK_API_KEY", "sk-test-deepseek")
 	t.Setenv("OPENAI_API_KEY", "sk-test-openai")
 	t.Setenv("HELIX_PROVIDER", "deepseek")
@@ -41,37 +40,32 @@ func TestExportEnvToSubprocess(t *testing.T) {
 
 	env := ExportEnvToSubprocess()
 
-	// 验证相关 key 出现
 	found := make(map[string]bool)
 	for _, e := range env {
-		for _, key := range []string{"DEEPSEEK_API_KEY", "OPENAI_API_KEY", "HELIX_PROVIDER"} {
+		for _, key := range []string{"DEEPSEEK_API_KEY", "OPENAI_API_KEY", "HELIX_PROVIDER", "IRRELEVANT_KEY"} {
 			if len(e) > len(key) && e[:len(key)+1] == key+"=" {
 				found[key] = true
 			}
 		}
 	}
 
-	if !found["DEEPSEEK_API_KEY"] {
-		t.Error("DEEPSEEK_API_KEY should be in exported env")
+	if found["DEEPSEEK_API_KEY"] {
+		t.Error("DEEPSEEK_API_KEY should NOT be in exported env")
 	}
-	if !found["OPENAI_API_KEY"] {
-		t.Error("OPENAI_API_KEY should be in exported env")
+	if found["OPENAI_API_KEY"] {
+		t.Error("OPENAI_API_KEY should NOT be in exported env")
 	}
 	if !found["HELIX_PROVIDER"] {
 		t.Error("HELIX_PROVIDER should be in exported env")
 	}
-
-	// 验证不相关 key 不出现
-	for _, e := range env {
-		if len(e) >= len("IRRELEVANT_KEY") && e[:len("IRRELEVANT_KEY")+1] == "IRRELEVANT_KEY=" {
-			t.Error("IRRELEVANT_KEY should NOT be in exported env")
-		}
+	if found["IRRELEVANT_KEY"] {
+		t.Error("IRRELEVANT_KEY should NOT be in exported env")
 	}
 }
 
 func TestExportEnvToSubprocess_Empty(t *testing.T) {
 	// 清空所有相关环境变量后测试
-	for _, key := range []string{"DEEPSEEK_API_KEY", "MIMO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HELIX_PROVIDER", "HELIX_MODEL"} {
+	for _, key := range []string{"DEEPSEEK_API_KEY", "MIMO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "HELIX_PROVIDER", "HELIX_MODEL"} {
 		os.Unsetenv(key)
 	}
 

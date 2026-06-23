@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
@@ -19,27 +21,49 @@ type Agent struct {
 	messages  []provider.Message
 	maxSteps  int
 	model     string
+	workDir   string
 	goal      *GoalStopCondition // 停止条件
 	skillsMgr *skills.Manager    // Skills 管理器
+	memory    MemoryProvider     // 记忆提供者（项目知识/用户偏好）
+	history   []provider.Message // 跨轮次对话历史（不含 system，每轮重建）
 	onCost    func(float64)      // 成本回调
+	effort    *EffortManager     // 思考强度管理器
+
+	costBudget       float64
+	onBudgetExceeded func()
+	costAccumulated  float64
 }
 
 // New 创建 Agent
 func New(p provider.Provider, registry *tool.Registry) *Agent {
+	effort := NewEffortManager()
 	return &Agent{
-		provider:  p,
-		tools:     registry,
-		executor:  tool.NewExecutor(registry),
-		goal:      NewGoalStopCondition(p),
-		maxSteps:  20,
+		provider: p,
+		tools:    registry,
+		executor: tool.NewExecutor(registry),
+		goal:     NewGoalStopCondition(p),
+		maxSteps: effort.GetMaxSteps(),
+		effort:   effort,
 	}
 }
 
 // SetMaxSteps 设置最大推理步数
 func (a *Agent) SetMaxSteps(n int) { a.maxSteps = n }
 
+// SetEffort 设置思考强度管理器
+func (a *Agent) SetEffort(e *EffortManager) {
+	a.effort = e
+	a.maxSteps = e.GetMaxSteps()
+}
+
+// GetEffort 获取思考强度管理器
+func (a *Agent) GetEffort() *EffortManager { return a.effort }
+
 // SetModel 设置模型名
 func (a *Agent) SetModel(m string) { a.model = m }
+
+// SetWorkDir 设置工作目录
+func (a *Agent) SetWorkDir(d string) { a.workDir = d }
 
 // SetGoal 设置停止条件
 func (a *Agent) SetGoal(goal string) { a.goal.SetGoal(goal) }
@@ -50,14 +74,82 @@ func (a *Agent) GetGoal() string { return a.goal.GetGoal() }
 // ClearGoal 清除停止条件
 func (a *Agent) ClearGoal() { a.goal.Clear() }
 
-// SetSkillsManager 设置 Skills 管理器
-func (a *Agent) SetSkillsManager(mgr *skills.Manager) { a.skillsMgr = mgr }
+// SetSkillsManager 设置 Skills 管理器，并注册 `skill` 工具，
+// 让模型可以按需加载某个 skill 的完整说明（渐进式披露）。
+func (a *Agent) SetSkillsManager(mgr *skills.Manager) {
+	a.skillsMgr = mgr
+	if mgr == nil || a.tools == nil {
+		return
+	}
+	skillTool := tool.NewSkillTool(
+		func() []tool.SkillInfo {
+			out := make([]tool.SkillInfo, 0)
+			for _, s := range mgr.List() {
+				out = append(out, tool.SkillInfo{Name: s.Name, Description: s.Description})
+			}
+			return out
+		},
+		func(name string) (string, error) {
+			s, ok := mgr.Get(name)
+			if !ok {
+				return "", fmt.Errorf("skill %q not found", name)
+			}
+			return s.Content()
+		},
+	)
+	_ = a.tools.Register(skillTool) // 重复注册时忽略错误（已存在即可）
+}
+
+// SetMemory 设置记忆提供者，其内容会注入到系统提示，实现跨会话的项目知识/偏好记忆
+func (a *Agent) SetMemory(m MemoryProvider) { a.memory = m }
+
+// SetHistory 设置跨轮次对话历史（不含 system 消息）。下一次 Run/RunStream
+// 会以 [system] + history + [新 user] 作为起点，实现多轮上下文连续。
+func (a *Agent) SetHistory(msgs []provider.Message) { a.history = msgs }
+
+// ConversationMessages 返回本轮结束后的完整对话（不含 system 提示），
+// 供上层（MultiAgent）作为下一轮的历史延续。
+func (a *Agent) ConversationMessages() []provider.Message {
+	if len(a.messages) <= 1 {
+		return nil
+	}
+	out := make([]provider.Message, len(a.messages)-1)
+	copy(out, a.messages[1:])
+	return out
+}
+
+// initMessages 以 [system] + history + [user:task] 初始化本轮消息列表。
+// 系统提示每轮重建（含动态环境/记忆/skills），历史保留以维持多轮连续。
+func (a *Agent) initMessages(task string) {
+	a.messages = make([]provider.Message, 0, len(a.history)+2)
+	a.messages = append(a.messages, provider.Message{Role: "system", Content: a.buildSystemPrompt()})
+	a.messages = append(a.messages, a.history...)
+	a.messages = append(a.messages, provider.Message{Role: "user", Content: task})
+}
 
 // SetCostCallback 设置成本回调（每次 API 调用后触发）
 func (a *Agent) SetCostCallback(fn func(float64)) { a.onCost = fn }
 
+// SetCostBudget 设置成本预算上限
+func (a *Agent) SetCostBudget(b float64) { a.costBudget = b }
+
+// SetOnBudgetExceeded 设置预算超限回调
+func (a *Agent) SetOnBudgetExceeded(fn func()) { a.onBudgetExceeded = fn }
+
 // AddGuard 添加工具执行守卫
 func (a *Agent) AddGuard(g tool.Guard) { a.executor.AddGuard(g) }
+
+// SetHooks 设置钩子管理器
+func (a *Agent) SetHooks(hm *tool.HookManager) { a.executor.SetHooks(hm) }
+
+// reasoningEffort 返回当前思考强度对应的 reasoning_effort 参数，
+// 仅当 provider 声明支持推理时才返回非空值（capability-driven，避免向不支持的厂商发送未知字段）。
+func (a *Agent) reasoningEffort() string {
+	if a.effort == nil || !a.provider.Capabilities().SupportsReasoning {
+		return ""
+	}
+	return a.effort.GetReasoningEffort()
+}
 
 // getContextWindow 获取当前模型的上下文窗口大小
 func (a *Agent) getContextWindow() int {
@@ -143,12 +235,7 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 		defer close(textCh)
 		defer close(errCh)
 
-		sysPrompt := a.buildSystemPrompt()
-
-		a.messages = []provider.Message{
-			{Role: "system", Content: sysPrompt},
-			{Role: "user", Content: task},
-		}
+		a.initMessages(task)
 
 		for step := 0; step < a.maxSteps; step++ {
 			select {
@@ -158,13 +245,14 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 			default:
 			}
 
-			// 截断以适应上下文窗口
-			a.truncateMessages(a.getContextWindow())
+			// 压缩以适应上下文窗口（缓存友好，失败时回退机械截断）
+			a.compactMessages(ctx, a.getContextWindow())
 
 			streamCh, err := a.provider.Stream(ctx, &provider.ChatRequest{
-				Model:    a.model,
-				Messages: a.messages,
-				Tools:    a.buildToolDefs(),
+				Model:           a.model,
+				Messages:        a.messages,
+				Tools:           a.buildToolDefs(),
+				ReasoningEffort: a.reasoningEffort(),
 			})
 			if err != nil {
 				errCh <- fmt.Errorf("stream error (step %d): %w", step, err)
@@ -206,6 +294,10 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 			if lastUsage != nil && a.onCost != nil {
 				cost := a.provider.Cost(a.model, *lastUsage)
 				a.onCost(cost.TotalCost)
+				a.costAccumulated += cost.TotalCost
+				if a.costBudget > 0 && a.costAccumulated >= a.costBudget && a.onBudgetExceeded != nil {
+					a.onBudgetExceeded()
+				}
 			}
 
 			// 合并工具调用增量
@@ -303,12 +395,7 @@ func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
 }
 
 func (a *Agent) Run(ctx context.Context, task string) (string, error) {
-	sysPrompt := a.buildSystemPrompt()
-
-	a.messages = []provider.Message{
-		{Role: "system", Content: sysPrompt},
-		{Role: "user", Content: task},
-	}
+	a.initMessages(task)
 
 	for step := 0; step < a.maxSteps; step++ {
 		select {
@@ -317,13 +404,14 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 		default:
 		}
 
-		// 截断以适应上下文窗口
-		a.truncateMessages(a.getContextWindow())
+		// 压缩以适应上下文窗口（缓存友好，失败时回退机械截断）
+		a.compactMessages(ctx, a.getContextWindow())
 
 		resp, err := a.provider.Chat(ctx, &provider.ChatRequest{
-			Model:    a.model,
-			Messages: a.messages,
-			Tools:    a.buildToolDefs(),
+			Model:           a.model,
+			Messages:        a.messages,
+			Tools:           a.buildToolDefs(),
+			ReasoningEffort: a.reasoningEffort(),
 		})
 		if err != nil {
 			return "", fmt.Errorf("chat error (step %d): %w", step, err)
@@ -332,6 +420,10 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 		if a.onCost != nil {
 			cost := a.provider.Cost(a.model, resp.Usage)
 			a.onCost(cost.TotalCost)
+			a.costAccumulated += cost.TotalCost
+			if a.costBudget > 0 && a.costAccumulated >= a.costBudget && a.onBudgetExceeded != nil {
+				a.onBudgetExceeded()
+			}
 		}
 
 		// 追加 assistant 消息（含 tool_calls 和 reasoning_content）
@@ -389,14 +481,8 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 				ToolCallID: tc.ID,
 			})
 		}
-
-		// 每 3 步评估一次 Goal
-		if a.goal.IsEnabled() && (step+1)%3 == 0 {
-			achieved, reason, evalErr := a.goal.Evaluate(ctx, a.messages)
-			if evalErr == nil && achieved {
-				return fmt.Sprintf("Goal achieved: %s", reason), nil
-			}
-		}
+		// 不在循环中按固定步频调用 judge（LLM 调用，成本/延迟翻倍）。
+		// Goal 仅在模型给出最终答复时、以及循环耗尽后做一次性评估。
 	}
 
 	// 最终检查 Goal
@@ -425,14 +511,38 @@ func (a *Agent) executeTools(ctx context.Context, toolCalls []provider.ToolCall)
 // buildSystemPrompt 构建系统提示词
 func (a *Agent) buildSystemPrompt() string {
 	var sb strings.Builder
-	sb.WriteString("You are Helix, an AI coding assistant.\n")
-	sb.WriteString("You have access to tools for reading/writing files, executing commands, and searching code.\n")
-	sb.WriteString("When asked to complete a task, use the appropriate tools and provide a final answer.\n")
+	sb.WriteString("You are Helix, an AI coding assistant operating in a terminal.\n")
+	sb.WriteString("You have access to tools for reading/writing files, editing code, executing commands, and searching code.\n")
+	sb.WriteString("\n## Working principles\n")
+	sb.WriteString("- Use tools to gather facts before acting; do not guess file contents or paths.\n")
+	sb.WriteString("- Make the smallest change that satisfies the request; match the surrounding code style and conventions.\n")
+	sb.WriteString("- Prefer editing existing files over creating new ones; do not add files unless necessary.\n")
+	sb.WriteString("- After modifying code, verify it (read it back, run the relevant build/test) before claiming success.\n")
+	sb.WriteString("- Be concise. Report what you did and what you found; omit information that does not change the outcome.\n")
+	sb.WriteString("- When the task is complete, give a final answer without further tool calls.\n")
+
+	sb.WriteString(a.buildEnvContext())
+
+	if a.memory != nil {
+		if mem := strings.TrimSpace(a.memory.BuildContextPrompt()); mem != "" {
+			sb.WriteString("\n## Long-term Memory\n")
+			sb.WriteString(mem)
+			sb.WriteString("\n")
+		}
+	}
+
+	if a.workDir != "" {
+		if instructions := loadProjectInstructions(a.workDir); instructions != "" {
+			sb.WriteString("\n## Project Instructions\n")
+			sb.WriteString(instructions)
+			sb.WriteString("\n")
+		}
+	}
 
 	if a.skillsMgr != nil {
 		skillList := a.skillsMgr.List()
 		if len(skillList) > 0 {
-			sb.WriteString("\n## Available Skills (use /skills <name> to load full content)\n")
+			sb.WriteString("\n## Available Skills (call the `skill` tool with a name to load its full instructions)\n")
 			for _, s := range skillList {
 				sb.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
 			}
@@ -440,6 +550,23 @@ func (a *Agent) buildSystemPrompt() string {
 	}
 
 	return sb.String()
+}
+
+var projectInstructionFiles = []string{"HELIX.md", "HELIX.local.md", ".helix/instructions.md"}
+
+func loadProjectInstructions(root string) string {
+	var parts []string
+	for _, name := range projectInstructionFiles {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		content := strings.TrimSpace(string(data))
+		if content != "" {
+			parts = append(parts, content)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // buildToolDefs 构建工具定义列表

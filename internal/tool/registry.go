@@ -55,4 +55,8 @@ func (r *Registry) RegisterDefaults() {
 	r.Register(&BashTool{})
 	r.Register(&GrepTool{})
 	r.Register(&GlobTool{})
+	r.Register(&GitStatusTool{})
+	r.Register(&GitDiffTool{})
+	r.Register(&GitLogTool{})
+	r.Register(&GitCommitTool{})
 }

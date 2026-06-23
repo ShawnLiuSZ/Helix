@@ -8,11 +8,30 @@ import (
 	"github.com/ShawnLiuSZ/Helix/internal/tool"
 )
 
+// mcpClient 抽象 stdio 与 SSE(HTTP) 两种传输，使 manager 能用同一套逻辑
+// 发现并注册工具。签名与 stdio Client 一致（不带 ctx），SSE 通过适配器接入。
+type mcpClient interface {
+	ListTools() ([]Tool, error)
+	CallTool(name string, args map[string]any) (*CallToolResult, error)
+	Close() error
+}
+
+// sseClientAdapter 把基于 ctx 的 SSEClient 适配成 mcpClient。
+// 工具调用用独立的 background ctx（CallTool 内部自带超时）；SSE 监听生命周期由
+// ConnectSSE 传入的 ctx 控制。
+type sseClientAdapter struct{ c *SSEClient }
+
+func (s *sseClientAdapter) ListTools() ([]Tool, error) { return s.c.ListTools(context.Background()) }
+func (s *sseClientAdapter) CallTool(name string, args map[string]any) (*CallToolResult, error) {
+	return s.c.CallTool(context.Background(), name, args)
+}
+func (s *sseClientAdapter) Close() error { return s.c.Close() }
+
 // PluginManager MCP 插件管理器
 type PluginManager struct {
-	mu      sync.RWMutex
-	clients map[string]*Client // name → client
-	tools   map[string]*mcpTool // tool name → wrapper
+	mu       sync.RWMutex
+	clients  map[string]mcpClient // name → client（stdio 或 SSE）
+	tools    map[string]*mcpTool  // tool name → wrapper
 	registry *tool.Registry
 }
 
@@ -21,7 +40,7 @@ type mcpTool struct {
 	name        string
 	description string
 	schema      tool.Schema
-	client      *Client
+	client      mcpClient
 }
 
 func (t *mcpTool) Name() string        { return t.name }
@@ -59,13 +78,13 @@ func (t *mcpTool) Execute(ctx context.Context, args map[string]any) (*tool.Resul
 // NewPluginManager 创建插件管理器
 func NewPluginManager(registry *tool.Registry) *PluginManager {
 	return &PluginManager{
-		clients:  make(map[string]*Client),
+		clients:  make(map[string]mcpClient),
 		tools:    make(map[string]*mcpTool),
 		registry: registry,
 	}
 }
 
-// Connect 连接 MCP 服务器
+// Connect 连接 MCP 服务器（stdio 传输）
 func (m *PluginManager) Connect(name, command string, args ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -80,8 +99,32 @@ func (m *PluginManager) Connect(name, command string, args ...string) error {
 	}
 
 	m.clients[name] = client
+	return m.registerClientTools(name, client)
+}
 
-	// 发现并注册工具
+// ConnectSSE 连接 MCP 服务器（HTTP SSE 传输）。
+// ctx 控制 SSE 监听协程的生命周期，应传入长生命周期的 context（如应用级 ctx）。
+func (m *PluginManager) ConnectSSE(ctx context.Context, name, baseURL string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.clients[name]; exists {
+		return fmt.Errorf("plugin %q already connected", name)
+	}
+
+	sse := NewSSEClient(baseURL)
+	if err := sse.Connect(ctx); err != nil {
+		return fmt.Errorf("connect SSE %q: %w", name, err)
+	}
+
+	client := &sseClientAdapter{c: sse}
+	m.clients[name] = client
+	return m.registerClientTools(name, client)
+}
+
+// registerClientTools 发现 client 的工具并注册到 registry（stdio/SSE 共用）。
+// 调用方需持有 m.mu。失败时回收 client 与登记项。
+func (m *PluginManager) registerClientTools(name string, client mcpClient) error {
 	tools, err := client.ListTools()
 	if err != nil {
 		client.Close()

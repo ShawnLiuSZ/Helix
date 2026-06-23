@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 // maxSubAgentDepth 子 Agent 递归 spawn 的最大深度，防止成本/栈爆炸。
 const maxSubAgentDepth = 3
+const maxAgents = 100
 
 // SubAgent 子 Agent
 type SubAgent struct {
@@ -26,9 +28,12 @@ type SubAgent struct {
 	result   string
 	err      error
 	mu       sync.Mutex
-	done     chan struct{}
-	ctx      context.Context
+	done       chan struct{}
+	finishedAt time.Time
+	ctx        context.Context
 	cancel   context.CancelFunc
+	bus      *MessageBus
+	msgCh    <-chan BusMessage
 }
 
 // SubAgentStatus 子 Agent 状态
@@ -64,6 +69,7 @@ type SubAgentManager struct {
 	mu        sync.RWMutex
 	agents    map[string]*SubAgent
 	idCounter int
+	bus       *MessageBus
 }
 
 // NewSubAgentManager 创建子 Agent 管理器
@@ -98,6 +104,7 @@ func (m *SubAgentManager) spawn(name, role, parentID string, depth int, p provid
 		done:     make(chan struct{}),
 		ctx:      ctx,
 		cancel:   cancel,
+		bus:      m.bus,
 	}
 
 	m.agents[id] = sa
@@ -165,6 +172,56 @@ func (m *SubAgentManager) CancelAll() {
 	}
 }
 
+func (m *SubAgentManager) SetBus(bus *MessageBus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bus = bus
+}
+
+func (m *SubAgentManager) Cleanup() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for id, sa := range m.agents {
+		sa.mu.Lock()
+		done := sa.status == StatusCompleted || sa.status == StatusFailed || sa.status == StatusCancelled
+		finishedAt := sa.finishedAt
+		sa.mu.Unlock()
+
+		if done && finishedAt.Before(cutoff) {
+			delete(m.agents, id)
+		}
+	}
+
+	if len(m.agents) > maxAgents {
+		type entry struct {
+			id         string
+			finishedAt time.Time
+		}
+		var completed []entry
+		for id, sa := range m.agents {
+			sa.mu.Lock()
+			done := sa.status == StatusCompleted || sa.status == StatusFailed || sa.status == StatusCancelled
+			fa := sa.finishedAt
+			sa.mu.Unlock()
+			if done {
+				completed = append(completed, entry{id: id, finishedAt: fa})
+			}
+		}
+		sort.Slice(completed, func(i, j int) bool {
+			return completed[i].finishedAt.Before(completed[j].finishedAt)
+		})
+		excess := len(m.agents) - maxAgents
+		if excess > len(completed) {
+			excess = len(completed)
+		}
+		for i := 0; i < excess; i++ {
+			delete(m.agents, completed[i].id)
+		}
+	}
+}
+
 // Run 启动子 Agent 执行任务。
 // 一次性：仅在 Pending 状态启动；完成/失败/取消/运行中再次调用都是 no-op，
 // 避免对已关闭的 done channel 二次 close 而 panic（H11）。
@@ -193,11 +250,13 @@ func (sa *SubAgent) Run(task string) {
 				sa.status = StatusFailed
 				sa.err = err
 			}
+			sa.finishedAt = time.Now()
 			return
 		}
 
 		sa.status = StatusCompleted
 		sa.result = result
+		sa.finishedAt = time.Now()
 	}()
 }
 
@@ -226,6 +285,40 @@ func (m *SubAgentManager) RunParallel(tasks map[string]string) map[string]string
 	}
 
 	wg.Wait()
+
+	if m.bus != nil {
+		var allMsgs []BusMessage
+		for _, sa := range m.agents {
+			ch := sa.Messages()
+			if ch == nil {
+				continue
+			}
+			for {
+				select {
+				case msg, ok := <-ch:
+					if !ok {
+						goto next
+					}
+					allMsgs = append(allMsgs, msg)
+				default:
+					goto next
+				}
+			}
+		next:
+		}
+		if len(allMsgs) > 0 {
+			encoded := ""
+			for i, msg := range allMsgs {
+				if i > 0 {
+					encoded += "|"
+				}
+				encoded += msg.FromID + "->" + msg.ToID + ":" + msg.Content
+			}
+			results["_messages"] = encoded
+		}
+	}
+
+	m.Cleanup()
 	return results
 }
 
@@ -272,4 +365,30 @@ func (sa *SubAgent) Error() error {
 // SetMaxSteps 设置最大步数
 func (sa *SubAgent) SetMaxSteps(n int) {
 	sa.agent.SetMaxSteps(n)
+}
+
+func (sa *SubAgent) SetWorkDir(d string) {
+	sa.agent.SetWorkDir(d)
+}
+
+func (sa *SubAgent) SetHooks(hm *tool.HookManager) {
+	sa.agent.SetHooks(hm)
+}
+
+func (sa *SubAgent) Send(msg BusMessage) {
+	if sa.bus == nil {
+		return
+	}
+	msg.FromID = sa.ID
+	sa.bus.Send(msg)
+}
+
+func (sa *SubAgent) Messages() <-chan BusMessage {
+	if sa.bus == nil {
+		return nil
+	}
+	if sa.msgCh == nil {
+		sa.msgCh = sa.bus.Subscribe(sa.ID)
+	}
+	return sa.msgCh
 }

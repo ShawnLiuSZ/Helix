@@ -85,8 +85,9 @@ func (m *Manager) Create(name, model, provider string) *Session {
 	m.sessions[id] = s
 	m.activeID = id
 
-	// 写入元数据作为第一行
-	s.saveMeta()
+	if err := s.saveMeta(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: save session meta %s: %v\n", id, err)
+	}
 
 	return s
 }
@@ -186,28 +187,27 @@ func (m *Manager) Save(id string) error {
 	return s.saveAll()
 }
 
-// saveMeta 写入元数据行（原子写入：先写临时文件，再 rename）
-func (s *Session) saveMeta() {
+func (s *Session) saveMeta() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tmpPath := s.filePath + ".tmp"
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
-		return
+		return err
 	}
 	defer func() {
 		f.Close()
-		os.Remove(tmpPath) // 清理临时文件
+		os.Remove(tmpPath)
 	}()
 
 	encoder := json.NewEncoder(f)
 	if err := encoder.Encode(s.Meta); err != nil {
-		return
+		return err
 	}
 	f.Close()
 
-	os.Rename(tmpPath, s.filePath)
+	return os.Rename(tmpPath, s.filePath)
 }
 
 // saveAll 完整保存（元数据 + 所有消息）
@@ -215,39 +215,46 @@ func (s *Session) saveAll() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	f, err := os.OpenFile(s.filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	tmpPath := s.filePath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		f.Close()
+		os.Remove(tmpPath)
+	}()
 
 	encoder := json.NewEncoder(f)
 
-	// 第一行：元数据
 	if err := encoder.Encode(s.Meta); err != nil {
 		return err
 	}
 
-	// 后续行：消息
 	for _, msg := range s.Messages {
 		if err := encoder.Encode(msg); err != nil {
 			return err
 		}
 	}
 
-	return nil
+	f.Close()
+
+	return os.Rename(tmpPath, s.filePath)
 }
 
 // appendToFile 追加消息
 func (m *Manager) appendToFile(s *Session, msg Message) {
 	f, err := os.OpenFile(s.filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: open session file %s: %v\n", s.filePath, err)
 		return
 	}
 	defer f.Close()
 
 	encoder := json.NewEncoder(f)
-	encoder.Encode(msg)
+	if err := encoder.Encode(msg); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: encode message to %s: %v\n", s.filePath, err)
+	}
 }
 
 // loadSessions 从磁盘加载
@@ -264,7 +271,11 @@ func (m *Manager) loadSessions() {
 
 		path := filepath.Join(m.baseDir, entry.Name())
 		s, err := loadFromFile(path)
-		if err != nil || s == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: load session %s: %v\n", path, err)
+			continue
+		}
+		if s == nil {
 			continue
 		}
 
@@ -290,9 +301,12 @@ func loadFromFile(path string) (*Session, error) {
 
 	// 后续行：消息
 	var messages []Message
+	lineNum := 1
 	for decoder.More() {
+		lineNum++
 		var msg Message
 		if err := decoder.Decode(&msg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s line %d: %v\n", path, lineNum, err)
 			break
 		}
 		messages = append(messages, msg)
