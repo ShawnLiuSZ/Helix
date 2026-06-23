@@ -15,6 +15,9 @@ type ChatRequest struct {
 	Messages []Message `json:"messages"`
 	Tools    []ToolDef `json:"tools,omitempty"`
 	Stream   bool      `json:"stream"`
+	// ReasoningEffort 推理强度（low/medium/high）。仅对支持推理的模型设置；
+	// omitempty 保证其余 provider 不会收到该字段。
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // ToolDef 工具定义（OpenAI tool 格式）

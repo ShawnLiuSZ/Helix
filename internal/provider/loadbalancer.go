@@ -212,11 +212,90 @@ func (lb *LoadBalancer) leastLatency() Provider {
 	return best
 }
 
-// costOptimized 成本优化策略
 func (lb *LoadBalancer) costOptimized() Provider {
-	// 简单实现：选择第一个可用的 Provider
-	// 实际实现应根据成本模型选择
-	return lb.providers[0]
+	var eligible []Provider
+	for _, p := range lb.providers {
+		metrics := lb.metrics[p.Name()]
+		if metrics.GetSuccessRate() >= 0.5 {
+			eligible = append(eligible, p)
+		}
+	}
+
+	if len(eligible) == 0 {
+		return lb.providers[0]
+	}
+	if len(eligible) == 1 {
+		return eligible[0]
+	}
+
+	type providerScore struct {
+		provider Provider
+		score    float64
+	}
+
+	scores := make([]providerScore, 0, len(eligible))
+
+	var minLatency, maxLatency, minCost, maxCost float64
+	latencies := make([]float64, len(eligible))
+	costs := make([]float64, len(eligible))
+
+	for i, p := range eligible {
+		metrics := lb.metrics[p.Name()]
+		lat := metrics.GetAvgLatency()
+		latencies[i] = lat
+
+		models := p.Models()
+		costPerToken := 0.0
+		if len(models) > 0 {
+			costPerToken = models[0].Cost.Input + models[0].Cost.Output
+		}
+		costs[i] = costPerToken
+
+		if i == 0 {
+			minLatency = lat
+			maxLatency = lat
+			minCost = costPerToken
+			maxCost = costPerToken
+		} else {
+			if lat < minLatency {
+				minLatency = lat
+			}
+			if lat > maxLatency {
+				maxLatency = lat
+			}
+			if costPerToken < minCost {
+				minCost = costPerToken
+			}
+			if costPerToken > maxCost {
+				maxCost = costPerToken
+			}
+		}
+	}
+
+	for i, p := range eligible {
+		metrics := lb.metrics[p.Name()]
+		successRate := metrics.GetSuccessRate()
+
+		var normLatency, normCost float64
+		if maxLatency > minLatency {
+			normLatency = (latencies[i] - minLatency) / (maxLatency - minLatency)
+		}
+		if maxCost > minCost {
+			normCost = (costs[i] - minCost) / (maxCost - minCost)
+		}
+
+		score := (1-successRate)*0.3 + normLatency*0.3 + normCost*0.4
+		scores = append(scores, providerScore{provider: p, score: score})
+	}
+
+	best := scores[0]
+	for _, s := range scores[1:] {
+		if s.score < best.score {
+			best = s
+		}
+	}
+
+	return best.provider
 }
 
 // RecordRequest 记录请求指标

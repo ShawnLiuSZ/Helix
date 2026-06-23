@@ -136,19 +136,37 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 		return nil, fmt.Errorf("pattern and path are required")
 	}
 
+	const maxOutputSize = 512 * 1024
+
 	cmd := exec.CommandContext(ctx, "grep", "-rn", pattern, path)
 	cmd.Env = EnvForSubprocess()
-	output, err := cmd.CombinedOutput()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create pipe: %w", err)
+	}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start grep: %w", err)
+	}
+
+	output, _ := io.ReadAll(io.LimitReader(stdout, maxOutputSize))
+	truncated := len(output) >= maxOutputSize
+	if truncated && cmd.Process != nil {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	waitErr := cmd.Wait()
 
 	content := string(output)
+	if truncated {
+		content += "\n... (output truncated at 512KB)"
+	}
+
 	if len(content) == 0 {
 		content = fmt.Sprintf("No matches found for '%s' in %s", pattern, path)
 	}
-	if err != nil {
-		// grep returns exit 1 when no matches found
-		if len(output) == 0 {
-			content = fmt.Sprintf("No matches found for '%s' in %s", pattern, path)
-		}
+	if waitErr != nil && !truncated && len(output) == 0 {
+		content = fmt.Sprintf("No matches found for '%s' in %s", pattern, path)
 	}
 
 	return &Result{Content: content}, nil
@@ -184,15 +202,34 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 		path = "."
 	}
 
+	const maxOutputSize = 512 * 1024
+
 	cmd := exec.CommandContext(ctx, "find", path, "-name", pattern, "-type", "f")
 	cmd.Env = EnvForSubprocess()
-	output, _ := cmd.CombinedOutput()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create pipe: %w", err)
+	}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start find: %w", err)
+	}
+
+	output, _ := io.ReadAll(io.LimitReader(stdout, maxOutputSize))
+	truncated := len(output) >= maxOutputSize
+	if truncated && cmd.Process != nil {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.Wait()
 
 	content := strings.TrimSpace(string(output))
+	if truncated {
+		content += "\n... (output truncated at 512KB)"
+	}
 	if len(content) == 0 {
 		content = fmt.Sprintf("No files matching '%s'", pattern)
 	}
-	// find 命令在没有找到文件时会返回错误，这是正常情况
 
 	return &Result{Content: content}, nil
 }

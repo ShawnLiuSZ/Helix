@@ -49,6 +49,16 @@ func (s *StubProvider) ChatCallCount() int {
 	return len(s.chatCalls)
 }
 
+// LastChatRequest 返回最近一次 Chat 请求（无调用则返回 nil）
+func (s *StubProvider) LastChatRequest() *provider.ChatRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.chatCalls) == 0 {
+		return nil
+	}
+	return s.chatCalls[len(s.chatCalls)-1]
+}
+
 // NewStubProvider 创建 StubProvider
 func NewStubProvider(chatFn func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error)) *StubProvider {
 	return &StubProvider{

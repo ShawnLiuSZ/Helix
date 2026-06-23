@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ShawnLiuSZ/Helix/internal/agent"
+	"github.com/ShawnLiuSZ/Helix/internal/consts"
+	"github.com/ShawnLiuSZ/Helix/internal/control"
+	"github.com/ShawnLiuSZ/Helix/internal/memory"
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
 	"github.com/ShawnLiuSZ/Helix/internal/session"
 	"github.com/ShawnLiuSZ/Helix/internal/skills"
@@ -70,6 +74,9 @@ type App struct {
 	// Skills
 	skillsMgr *skills.Manager
 
+	// 长期记忆（/remember 写入，启动时自动注入）
+	memMgr *memory.Manager
+
 	// 模型选择状态
 	showModelPicker     bool
 	modelList           []modelPickerEntry
@@ -78,9 +85,11 @@ type App struct {
 	allProviderModels   map[string][]provider.ModelInfo
 
 	// 成本
+	costMu      sync.Mutex
 	costTotal   float64
 	costSession float64
 	costLast    float64
+	costBudget  float64
 
 	// 会话保存状态
 	savedMsgCount int // 已保存的消息数量
@@ -99,6 +108,9 @@ type App struct {
 
 	// BubbleTea program reference
 	program *tea.Program
+
+	// Approval
+	pendingApproval *pendingWrite
 
 	// 请求取消
 	cancelFunc context.CancelFunc
@@ -126,10 +138,20 @@ type modelPickerEntry struct {
 	ModelID      string
 }
 
+type pendingWrite struct {
+	toolName   string
+	path       string
+	oldContent string
+	newContent string
+	decision   chan bool
+}
+
+type approvalMsg struct{}
+
 // 所有可用命令
 var allCommands = []string{
 	"/help", "/mode", "/build", "/plan", "/compose", "/max",
-	"/goal", "/clear", "/cost", "/env", "/model", "/skills", "/sessions", "/compact", "/queue", "/steps", "/quit",
+	"/goal", "/clear", "/cost", "/budget", "/env", "/model", "/skills", "/sessions", "/compact", "/queue", "/steps", "/remember", "/quit",
 }
 
 // 样式
@@ -151,6 +173,12 @@ var (
 	costRedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	activityStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Italic(true)
 	contextWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+
+	approvalTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	diffAddStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	diffDelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	diffHeaderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	approvalHelpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true)
 )
 
 // NewApp 创建 TUI 应用
@@ -161,6 +189,15 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 	skillsMgr := skills.NewManager()
 	skillsMgr.Load()
 	ag.SetSkillsManager(skillsMgr)
+
+	// 接入长期记忆（项目知识/用户偏好注入系统提示）。best-effort：打不开则跳过。
+	var memMgr *memory.Manager
+	if home, err := os.UserHomeDir(); err == nil {
+		if store, err := memory.NewStore(filepath.Join(home, ".helix", "memory.db")); err == nil {
+			memMgr = memory.NewManager(store)
+			ag.SetMemory(memMgr)
+		}
+	}
 
 	// 创建 textarea
 	ta := textarea.New()
@@ -190,6 +227,7 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 		mode:           agent.ModeBuild,
 		envVars:        loadEnvVars(),
 		skillsMgr:      skillsMgr,
+		memMgr:         memMgr,
 		textArea:       ta,
 		glamourRenderer: renderer,
 		renderCache:    make(map[string]string),
@@ -202,6 +240,13 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 		app.costLast = cost
 		app.costSession += cost
 		app.costTotal += cost
+		if app.costBudget > 0 && app.costSession >= app.costBudget && app.cancelFunc != nil {
+			app.cancelFunc()
+			app.messages = append(app.messages, chatMessage{
+				Role:    "system",
+				Content: fmt.Sprintf("预算已用尽 ($%.4f/$%.4f)。使用 /budget <amount> 调整预算。", app.costSession, app.costBudget),
+			})
+		}
 	})
 
 	return app
@@ -209,7 +254,44 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 
 func (a *App) SetSessionManager(mgr *session.Manager) { a.sessionMgr = mgr }
 func (a *App) SetModel(m string)                       { a.model = m; a.agent.SetModel(m) }
+func (a *App) SetWorkDir(d string)                     { a.agent.SetWorkDir(d) }
 func (a *App) SetProgram(p *tea.Program)               { a.program = p }
+func (a *App) SetHooks(hm *tool.HookManager)            { a.agent.SetHooks(hm) }
+
+func (a *App) AddApprovalGuard(perm *control.Permission) {
+	a.agent.AddGuard(func(tc tool.Call) error {
+		if tc.Name != "write_file" && tc.Name != "edit_file" {
+			return nil
+		}
+		if perm != nil {
+			if allowed, _ := perm.Check(tc.Name, tc.Args); allowed {
+				return nil
+			}
+		}
+		path, _ := tc.Args["path"].(string)
+		pw := &pendingWrite{
+			toolName: tc.Name,
+			path:     path,
+			decision: make(chan bool, 1),
+		}
+		if tc.Name == "write_file" {
+			if data, err := os.ReadFile(path); err == nil {
+				pw.oldContent = string(data)
+			}
+			pw.newContent, _ = tc.Args["content"].(string)
+		} else {
+			pw.oldContent, _ = tc.Args["old_text"].(string)
+			pw.newContent, _ = tc.Args["new_text"].(string)
+		}
+		if a.program != nil {
+			a.program.Send(approvalMsg{})
+		}
+		if <-pw.decision {
+			return nil
+		}
+		return fmt.Errorf("rejected by user")
+	})
+}
 
 // SetProviders 设置所有 provider 列表（用于 /model 跨 provider 切换）
 func (a *App) SetProviders(providers []provider.Provider) {
@@ -250,6 +332,7 @@ func (a *App) RestoreSession(sess *session.Session) {
 	a.messages = []chatMessage{
 		{Role: "system", Content: fmt.Sprintf("已恢复会话: %s (%d 条消息)", sess.Name, len(sess.Messages)), Timestamp: time.Now()},
 	}
+	var history []provider.Message
 	for _, msg := range sess.Messages {
 		a.messages = append(a.messages, chatMessage{
 			Role:      msg.Role,
@@ -257,7 +340,13 @@ func (a *App) RestoreSession(sess *session.Session) {
 			ToolName:  msg.ToolName,
 			Timestamp: msg.Timestamp,
 		})
+		// 仅以 user/assistant 文本重建 LLM 对话历史（session 不存 tool_calls 结构，
+		// 跳过 tool/system/空内容以免产生畸形消息序列）。
+		if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
+			history = append(history, provider.Message{Role: msg.Role, Content: msg.Content})
+		}
 	}
+	a.agent.SetHistory(history) // 让模型在恢复会话后仍记得之前的对话
 	a.messages = append(a.messages, chatMessage{
 		Role: "system", Content: "会话已恢复，继续对话或输入 /help 查看命令", Timestamp: time.Now(),
 	})
@@ -287,11 +376,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 更新 viewport
 		if a.viewport.Width == 0 {
 			a.viewport = viewport.New(msg.Width, a.height-8)
-			a.viewport.SetContent(a.renderMessages(a.height - 8))
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 		} else {
 			a.viewport.Width = msg.Width
 			a.viewport.Height = a.height - 8
-			a.viewport.SetContent(a.renderMessages(a.height - 8))
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 			a.viewport.GotoBottom()
 		}
 
@@ -307,8 +396,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamChunkMsg:
 		a.streamMu.Lock()
 		a.streamBuf += string(msg)
+		buf := a.streamBuf
 		a.streamMu.Unlock()
-		a.viewport.SetContent(a.renderMessages(a.height - 8))
+		a.viewport.SetContent(a.renderMessages(a.height-8, buf))
 		a.viewport.GotoBottom()
 		return a, nil
 
@@ -321,9 +411,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.cancelFunc = nil
 		a.messages = append(a.messages, chatMessage{Role: "assistant", Content: content, Timestamp: time.Now()})
 		a.saveSession()
-		a.viewport.SetContent(a.renderMessages(a.height - 8))
+		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 		a.viewport.GotoBottom()
-		// 处理队列中的下一个任务
 		return a, a.processQueue()
 
 	case streamErrorMsg:
@@ -332,10 +421,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		errStr := friendlyError(string(msg))
 		a.messages = append(a.messages, chatMessage{Role: "error", Content: errStr, Timestamp: time.Now()})
 		a.saveSession()
-		a.viewport.SetContent(a.renderMessages(a.height - 8))
+		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 		a.viewport.GotoBottom()
-		// 处理队列中的下一个任务
 		return a, a.processQueue()
+
+	case approvalMsg:
+		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+		a.viewport.GotoBottom()
+		return a, nil
 	}
 
 	// 更新 textarea
@@ -354,16 +447,38 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	if a.pendingApproval != nil {
+		switch key {
+		case "enter":
+			pw := a.pendingApproval
+			a.pendingApproval = nil
+			pw.decision <- true
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		case "esc":
+			pw := a.pendingApproval
+			a.pendingApproval = nil
+			pw.decision <- false
+			a.messages = append(a.messages, chatMessage{Role: "system", Content: "操作已拒绝"})
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		default:
+			return a, nil
+		}
+	}
+
 	// 模型选择器模式
 	if a.showModelPicker {
 		switch key {
 		case "down":
 			a.modelIdx = (a.modelIdx + 1) % len(a.modelList)
-			a.viewport.SetContent(a.renderMessages(a.height - 8))
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 			return a, nil
 		case "up":
 			a.modelIdx = (a.modelIdx - 1 + len(a.modelList)) % len(a.modelList)
-			a.viewport.SetContent(a.renderMessages(a.height - 8))
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 			return a, nil
 		case "enter":
 			if a.modelIdx >= 0 && a.modelIdx < len(a.modelList) {
@@ -382,14 +497,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.messages = append(a.messages, chatMessage{
 					Role: "system", Content: fmt.Sprintf("模型切换为: %s/%s", entry.ProviderName, entry.ModelID),
 				})
-				a.viewport.SetContent(a.renderMessages(a.height - 8))
+				a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 				a.viewport.GotoBottom()
 			}
 			a.showModelPicker = false
 			return a, nil
 		case "esc":
 			a.showModelPicker = false
-			a.viewport.SetContent(a.renderMessages(a.height - 8))
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 			return a, nil
 		}
 	}
@@ -429,7 +544,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.cancelFunc = nil
 			a.loading = false
 			a.messages = append(a.messages, chatMessage{Role: "system", Content: "请求已取消"})
-			a.viewport.SetContent(a.renderMessages(a.height - 8))
+			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 			return a, nil
 		}
 		a.textArea.Reset()
@@ -519,7 +634,7 @@ func (a *App) handleEnter() (tea.Model, tea.Cmd) {
 			Role:    "system",
 			Content: fmt.Sprintf("已加入队列 (%d 待处理)", queueLen),
 		})
-		a.viewport.SetContent(a.renderMessages(a.height - 8))
+		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 		a.viewport.GotoBottom()
 		return a, nil
 	}
@@ -528,7 +643,7 @@ func (a *App) handleEnter() (tea.Model, tea.Cmd) {
 	a.loading = true
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancelFunc = cancel
-	a.viewport.SetContent(a.renderMessages(a.height - 8))
+	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 	a.viewport.GotoBottom()
 	return a, a.runAgent(ctx, input)
 }
@@ -555,7 +670,9 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
   /skills    显示可用工具列表
   /clear     清空聊天
   /cost      显示成本
+  /budget    设置/查看预算上限
   /compact   压缩上下文历史
+  /remember  记住一条项目事实(下次会话自动注入)
   /env       环境变量管理
   /sessions  会话列表
   /queue     查看任务队列
@@ -570,7 +687,12 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 Goal/Stop Condition:
   /goal "实现用户认证模块"  设置停止条件
   /goal                      显示当前停止条件
-  /goal clear                清除停止条件`
+  /goal clear                清除停止条件
+
+Budget:
+  /budget 1.00      设置预算上限为 $1.00
+  /budget            查看当前预算
+  /budget clear      清除预算`
 		a.messages = append(a.messages, chatMessage{Role: "system", Content: help})
 		return a, nil
 
@@ -611,8 +733,12 @@ Goal/Stop Condition:
 	case "/goal":
 		return a.handleGoalCmd(parts)
 
+	case "/remember":
+		return a.handleRememberCmd(strings.TrimSpace(strings.TrimPrefix(cmd, "/remember")))
+
 	case "/clear":
 		a.messages = a.messages[:0]
+		a.agent.ResetConversation() // 同时清空模型侧对话历史
 		a.viewport.SetContent("")
 		return a, nil
 
@@ -620,6 +746,9 @@ Goal/Stop Condition:
 		msg := fmt.Sprintf("会话: $%.4f | 上次: $%.4f | 累计: $%.4f", a.costSession, a.costLast, a.costTotal)
 		a.messages = append(a.messages, chatMessage{Role: "system", Content: msg})
 		return a, nil
+
+	case "/budget":
+		return a.handleBudgetCmd(parts)
 
 	case "/queue":
 		if len(a.taskQueue) == 0 {
@@ -710,6 +839,50 @@ func (a *App) handleGoalCmd(parts []string) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+func (a *App) handleBudgetCmd(parts []string) (tea.Model, tea.Cmd) {
+	if len(parts) < 2 {
+		if a.costBudget <= 0 {
+			a.messages = append(a.messages, chatMessage{
+				Role:    "system",
+				Content: "当前未设置预算。\n\n使用 /budget <amount> 设置预算，例如 /budget 1.00",
+			})
+		} else {
+			a.messages = append(a.messages, chatMessage{
+				Role:    "system",
+				Content: fmt.Sprintf("预算: $%.2f | 已用: $%.4f | 剩余: $%.4f\n\n使用 /budget clear 清除预算", a.costBudget, a.costSession, a.costBudget-a.costSession),
+			})
+		}
+		return a, nil
+	}
+
+	if parts[1] == "clear" {
+		a.costBudget = 0
+		a.agent.SetCostBudget(0)
+		a.messages = append(a.messages, chatMessage{
+			Role:    "system",
+			Content: "已清除预算",
+		})
+		return a, nil
+	}
+
+	var amount float64
+	if _, err := fmt.Sscanf(parts[1], "%f", &amount); err != nil || amount <= 0 {
+		a.messages = append(a.messages, chatMessage{
+			Role:    "system",
+			Content: "无效金额，请输入正数，例如 /budget 1.00",
+		})
+		return a, nil
+	}
+
+	a.costBudget = amount
+	a.agent.SetCostBudget(amount)
+	a.messages = append(a.messages, chatMessage{
+		Role:    "system",
+		Content: fmt.Sprintf("预算已设置为 $%.2f。当前已用 $%.4f", amount, a.costSession),
+	})
+	return a, nil
+}
+
 func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 	if len(parts) < 2 {
 		// 收集所有 provider 的所有模型
@@ -747,7 +920,7 @@ func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 			models := a.provider.Models()
 			if len(models) == 0 {
 				a.messages = append(a.messages, chatMessage{Role: "system", Content: "当前 Provider 没有注册模型"})
-				a.viewport.SetContent(a.renderMessages(a.height - 8))
+				a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 				a.viewport.GotoBottom()
 				return a, nil
 			}
@@ -768,7 +941,7 @@ func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.showModelPicker = true
-		a.viewport.SetContent(a.renderMessages(a.height - 8))
+		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 		a.viewport.GotoBottom()
 		return a, nil
 	}
@@ -792,7 +965,7 @@ func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 	a.model = newModel
 	a.agent.SetModel(newModel)
 	a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("模型切换为: %s/%s", a.provider.Name(), newModel)})
-	a.viewport.SetContent(a.renderMessages(a.height - 8))
+	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 	a.viewport.GotoBottom()
 	return a, nil
 }
@@ -923,7 +1096,7 @@ func (a *App) handleCompactCmd() (tea.Model, tea.Cmd) {
 	newMessages = append(newMessages, a.messages[len(a.messages)-keepRecent:]...)
 	a.messages = newMessages
 
-	a.viewport.SetContent(a.renderMessages(a.height - 8))
+	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 	a.messages = append(a.messages, chatMessage{
 		Role: "system", Content: fmt.Sprintf("上下文已压缩：保留最近 %d 条消息，中间 %d 条已摘要。", keepRecent, len(middle)),
 	})
@@ -975,6 +1148,13 @@ func (a *App) View() string {
 		sb.WriteString("\n")
 	}
 
+	// Approval diff
+	if a.pendingApproval != nil {
+		sb.WriteString("\n")
+		sb.WriteString(a.renderApproval())
+		sb.WriteString("\n")
+	}
+
 	// 命令联想
 	if a.showSuggestions && len(a.suggestions) > 0 {
 		for i, s := range a.suggestions {
@@ -1007,7 +1187,7 @@ func (a *App) renderTitle() string {
 	return headerStyle.Width(a.width).Render(title)
 }
 
-func (a *App) renderMessages(visibleLines int) string {
+func (a *App) renderMessages(visibleLines int, streamBuf string) string {
 	var sb strings.Builder
 
 	for _, msg := range a.messages {
@@ -1178,10 +1358,16 @@ func (a *App) renderMarkdown(content string) string {
 	}
 	result := strings.TrimRight(rendered, "\n")
 
-	// 缓存结果（限制缓存大小，避免内存无限增长）
-	if len(a.renderCache) < 500 {
-		a.renderCache[content] = result
+	// 缓存结果（满了则清空一半，避免内存无限增长）
+	if len(a.renderCache) >= consts.MaxRenderCacheEntries {
+		for k := range a.renderCache {
+			delete(a.renderCache, k)
+			if len(a.renderCache) <= consts.MaxRenderCacheEntries/2 {
+				break
+			}
+		}
 	}
+	a.renderCache[content] = result
 
 	return result
 }
@@ -1204,13 +1390,19 @@ func (a *App) renderStatusBar() string {
 }
 
 func (a *App) renderCost() string {
-	if a.costSession < 0.05 {
-		return costGreenStyle.Render(fmt.Sprintf("$%.4f", a.costSession))
+	var display string
+	if a.costBudget > 0 {
+		display = fmt.Sprintf("$%.4f/$%.2f", a.costSession, a.costBudget)
+	} else {
+		display = fmt.Sprintf("$%.4f", a.costSession)
 	}
-	if a.costSession < 0.20 {
-		return costYellowStyle.Render(fmt.Sprintf("$%.4f", a.costSession))
+	if a.costSession < consts.CostGreenThreshold {
+		return costGreenStyle.Render(display)
 	}
-	return costRedStyle.Render(fmt.Sprintf("$%.4f", a.costSession))
+	if a.costSession < consts.CostYellowThreshold {
+		return costYellowStyle.Render(display)
+	}
+	return costRedStyle.Render(display)
 }
 
 func (a *App) renderContextUsage() string {
@@ -1222,6 +1414,80 @@ func (a *App) renderContextUsage() string {
 		return contextWarnStyle.Render(fmt.Sprintf("%dk/%dk ⚠️", a.tokensUsed/1000, a.tokensWindow/1000))
 	}
 	return fmt.Sprintf("%dk/%dk", a.tokensUsed/1000, a.tokensWindow/1000)
+}
+
+func (a *App) renderApproval() string {
+	pw := a.pendingApproval
+	var sb strings.Builder
+
+	sb.WriteString(approvalTitleStyle.Render(fmt.Sprintf("  ⚠ %s: %s", pw.toolName, pw.path)))
+	sb.WriteString("\n")
+
+	if pw.toolName == "write_file" {
+		sb.WriteString(renderWriteDiff(pw))
+	} else {
+		sb.WriteString(renderEditDiff(pw))
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(approvalHelpStyle.Render("  Enter 确认 | Esc 拒绝"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderWriteDiff(pw *pendingWrite) string {
+	var sb strings.Builder
+	lines := strings.Split(pw.newContent, "\n")
+	if len(lines) > 30 {
+		lines = lines[:30]
+	}
+	if pw.oldContent != "" {
+		sb.WriteString(diffHeaderStyle.Render("  --- (current)"))
+		sb.WriteString("\n")
+		oldLines := strings.Split(pw.oldContent, "\n")
+		if len(oldLines) > 10 {
+			oldLines = oldLines[:10]
+		}
+		for _, l := range oldLines {
+			sb.WriteString(diffDelStyle.Render("  - " + l))
+			sb.WriteString("\n")
+		}
+		sb.WriteString(diffHeaderStyle.Render("  +++ (new)"))
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(diffHeaderStyle.Render("  +++ (new file)"))
+		sb.WriteString("\n")
+	}
+	for _, l := range lines {
+		sb.WriteString(diffAddStyle.Render("  + " + l))
+		sb.WriteString("\n	")
+	}
+	return sb.String()
+}
+
+func renderEditDiff(pw *pendingWrite) string {
+	var sb strings.Builder
+	sb.WriteString(diffHeaderStyle.Render("  --- old_text"))
+	sb.WriteString("\n")
+	oldLines := strings.Split(pw.oldContent, "\n")
+	if len(oldLines) > 20 {
+		oldLines = oldLines[:20]
+	}
+	for _, l := range oldLines {
+		sb.WriteString(diffDelStyle.Render("  - " + l))
+		sb.WriteString("\n")
+	}
+	sb.WriteString(diffHeaderStyle.Render("  +++ new_text"))
+	sb.WriteString("\n")
+	newLines := strings.Split(pw.newContent, "\n")
+	if len(newLines) > 20 {
+		newLines = newLines[:20]
+	}
+	for _, l := range newLines {
+		sb.WriteString(diffAddStyle.Render("  + " + l))
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 func (a *App) runAgent(ctx context.Context, input string) tea.Cmd {
@@ -1282,6 +1548,12 @@ func friendlyError(err string) string {
 		return "请求超时，请检查网络连接或稍后重试。"
 	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "dial tcp"):
 		return "无法连接到服务器，请检查网络。"
+	case strings.Contains(lower, "503"):
+		return "服务暂时不可用，请稍后重试。"
+	case strings.Contains(lower, "500"):
+		return "服务器内部错误，请稍后重试。"
+	case strings.Contains(lower, "ssl") || strings.Contains(lower, "tls"):
+		return "SSL/TLS 连接失败，请检查网络或代理配置。"
 	case strings.Contains(lower, "model") && (strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist")):
 		return "模型不存在，请检查模型名称或使用 /model 切换模型。"
 	case strings.Contains(lower, "max steps"):
@@ -1327,6 +1599,10 @@ func (a *App) handleEnvCommand(parts []string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		key := parts[2]
+		if !isValidEnvKey(key) {
+			a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("无效的环境变量名: %q（仅允许字母、数字、下划线，且不能以数字开头）", key)})
+			return a, nil
+		}
 		val := strings.Join(parts[3:], " ")
 		os.Setenv(key, val)
 		a.envVars[key] = maskValue(val)
@@ -1378,8 +1654,24 @@ func (a *App) processQueue() tea.Cmd {
 	a.loading = true
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancelFunc = cancel
-	a.viewport.SetContent(a.renderMessages(a.height - 8))
+	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
 	a.viewport.GotoBottom()
 
 	return a.runAgent(ctx, next)
+}
+
+// isValidEnvKey 校验环境变量名：仅允许字母、数字、下划线，且不能以数字开头
+func isValidEnvKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i, r := range key {
+		if i == 0 && r >= '0' && r <= '9' {
+			return false
+		}
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
 }

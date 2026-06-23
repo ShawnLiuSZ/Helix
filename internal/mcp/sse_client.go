@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,15 +17,18 @@ import (
 
 // SSEClient MCP SSE 客户端（HTTP SSE transport）
 type SSEClient struct {
-	baseURL    string
-	httpClient *http.Client
-	eventCh    chan SSEEvent
-	mu         sync.Mutex
-	nextID     atomic.Int64
-	serverInfo ServerInfo
-	tools      []Tool
-	initialized bool
-	sessionID  string
+	baseURL       string
+	httpClient    *http.Client
+	eventCh       chan SSEEvent
+	mu            sync.Mutex
+	nextID        atomic.Int64
+	serverInfo    ServerInfo
+	tools         []Tool
+	initialized   bool
+	sessionID     string
+	lastDataTime  atomic.Int64
+	notifyReconnect chan struct{}
+	reconnecting  atomic.Int32
 }
 
 // SSEEvent SSE 事件
@@ -37,9 +41,10 @@ type SSEEvent struct {
 // NewSSEClient 创建 SSE 客户端
 func NewSSEClient(baseURL string) *SSEClient {
 	return &SSEClient{
-		baseURL:    strings.TrimSuffix(baseURL, "/"),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		eventCh:    make(chan SSEEvent, 100),
+		baseURL:         strings.TrimSuffix(baseURL, "/"),
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
+		eventCh:         make(chan SSEEvent, 100),
+		notifyReconnect: make(chan struct{}, 1),
 	}
 }
 
@@ -136,6 +141,17 @@ func (c *SSEClient) discoverEndpoint(ctx context.Context) (string, error) {
 
 // listenSSE 监听 SSE 事件
 func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
+	const (
+		initialDelay = 1 * time.Second
+		maxDelay     = 30 * time.Second
+		multiplier   = 2.0
+		jitterPct    = 0.25
+		maxAttempts  = 10
+	)
+
+	delay := initialDelay
+	attempts := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -145,7 +161,7 @@ func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
 
 		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 		if err != nil {
-			time.Sleep(5 * time.Second)
+			delay, attempts = c.reconnectWithBackoff(ctx, delay, initialDelay, maxDelay, multiplier, jitterPct, maxAttempts, &attempts)
 			continue
 		}
 
@@ -155,24 +171,78 @@ func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			time.Sleep(5 * time.Second)
+			delay, attempts = c.reconnectWithBackoff(ctx, delay, initialDelay, maxDelay, multiplier, jitterPct, maxAttempts, &attempts)
 			continue
 		}
 
-		// 保存 session ID
 		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 			c.sessionID = sid
 		}
 
+		attempts = 0
+		delay = initialDelay
+		c.lastDataTime.Store(time.Now().UnixMilli())
+
+		done := make(chan struct{})
+		go c.heartbeatMonitor(ctx, done)
+
 		c.readSSEStream(ctx, resp.Body)
 		resp.Body.Close()
+		close(done)
 
-		// 重连延迟
-		time.Sleep(1 * time.Second)
+		c.reconnecting.Store(1)
+		n := make(chan struct{}, 1)
+		c.notifyReconnect = n
+
+		delay, attempts = c.reconnectWithBackoff(ctx, delay, initialDelay, maxDelay, multiplier, jitterPct, maxAttempts, &attempts)
 	}
 }
 
-// readSSEStream 读取 SSE 流
+func (c *SSEClient) reconnectWithBackoff(ctx context.Context, delay, initialDelay, maxDelay time.Duration, multiplier, jitterPct float64, maxAttempts int, attempts *int) (time.Duration, int) {
+	*attempts++
+	if *attempts > maxAttempts {
+		return delay, *attempts
+	}
+
+	jitter := delay.Seconds() * jitterPct * (2*rand.Float64() - 1)
+	sleepDuration := time.Duration(float64(delay.Seconds())+jitter) * time.Second
+	if sleepDuration < initialDelay {
+		sleepDuration = initialDelay
+	}
+
+	select {
+	case <-ctx.Done():
+		return delay, *attempts
+	case <-time.After(sleepDuration):
+	}
+
+	nextDelay := time.Duration(float64(delay) * multiplier)
+	if nextDelay > maxDelay {
+		nextDelay = maxDelay
+	}
+	return nextDelay, *attempts
+}
+
+func (c *SSEClient) heartbeatMonitor(ctx context.Context, done chan struct{}) {
+	const heartbeatTimeout = 60 * time.Second
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			lastTime := time.UnixMilli(c.lastDataTime.Load())
+			if time.Since(lastTime) > heartbeatTimeout {
+				return
+			}
+		}
+	}
+}
+
 func (c *SSEClient) readSSEStream(ctx context.Context, body io.Reader) {
 	scanner := bufio.NewScanner(body)
 	var event SSEEvent
@@ -195,6 +265,7 @@ func (c *SSEClient) readSSEStream(ctx context.Context, body io.Reader) {
 		} else if line == "" {
 			// 空行表示事件结束
 			if event.Data != "" {
+				c.lastDataTime.Store(time.Now().UnixMilli())
 				select {
 				case c.eventCh <- event:
 				default:
@@ -297,14 +368,35 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 
 // waitForResponse 等待响应
 func (c *SSEClient) waitForResponse(ctx context.Context, id int64) (*Response, error) {
+	return c.waitForResponseWithRetry(ctx, id, true)
+}
+
+func (c *SSEClient) waitForResponseWithRetry(ctx context.Context, id int64, canRetry bool) (*Response, error) {
 	timeout := time.After(30 * time.Second)
+
+	var notifyCh chan struct{}
+	if c.notifyReconnect != nil {
+		notifyCh = c.notifyReconnect
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timeout:
+			if canRetry && c.reconnecting.Load() == 1 {
+				c.reconnecting.Store(0)
+				time.Sleep(2 * time.Second)
+				return c.waitForResponseWithRetry(ctx, id, false)
+			}
 			return nil, fmt.Errorf("timeout waiting for response")
+		case <-notifyCh:
+			if canRetry {
+				c.reconnecting.Store(0)
+				time.Sleep(2 * time.Second)
+				return c.waitForResponseWithRetry(ctx, id, false)
+			}
+			return nil, fmt.Errorf("connection lost waiting for response")
 		case event := <-c.eventCh:
 			if event.Event == "message" || event.Event == "" {
 				var msg struct {

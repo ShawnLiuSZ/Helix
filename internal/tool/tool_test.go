@@ -131,12 +131,12 @@ func TestWriteFileTool_MissingArgs(t *testing.T) {
 func TestEditFileTool(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/edit.txt"
-	os.WriteFile(path, []byte("Hello, World!\nGoodbye, World!"), 0644)
+	os.WriteFile(path, []byte("Hello, World!\nGoodbye, Earth!"), 0644)
 
 	tl := &EditFileTool{}
 	_, err := tl.Execute(context.Background(), map[string]any{
 		"path":     path,
-		"old_text": "World",
+		"old_text": "World", // unique match
 		"new_text": "Helix",
 	})
 	if err != nil {
@@ -144,7 +144,7 @@ func TestEditFileTool(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(path)
-	if string(data) != "Hello, Helix!\nGoodbye, Helix!" {
+	if string(data) != "Hello, Helix!\nGoodbye, Earth!" {
 		t.Errorf("file content = %q", string(data))
 	}
 }

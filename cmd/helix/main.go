@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/ShawnLiuSZ/Helix/internal/config"
 	"github.com/ShawnLiuSZ/Helix/internal/control"
 	"github.com/ShawnLiuSZ/Helix/internal/dashboard"
+	"github.com/ShawnLiuSZ/Helix/internal/mcp"
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
 	"github.com/ShawnLiuSZ/Helix/internal/provider/deepseek"
 	"github.com/ShawnLiuSZ/Helix/internal/provider/mimo"
@@ -53,6 +55,7 @@ func main() {
 
 	// 注册环境变量提供者（工具子进程使用）
 	tool.SetEnvProvider(&envProvider{})
+	tool.SetTaskStore(tool.NewTaskStore())
 
 	args := flag.Args()
 
@@ -94,7 +97,7 @@ func runCommand(args []string) {
 	}
 
 	if task == "" {
-		fmt.Fprintln(os.Stderr, "Error: no task provided")
+		fmt.Fprintln(os.Stderr, "错误: 未提供任务")
 		os.Exit(1)
 	}
 
@@ -130,10 +133,17 @@ func runCommand(args []string) {
 	perm := control.NewPermission(control.ModeAuto)
 	configureToolPermissions(tools, perm)
 
+	// 连接配置的 MCP 插件（stdio/SSE）
+	connectPlugins(context.Background(), cfg.Plugins, tools)
+
 	// 创建 Agent
 	ag := agent.New(p, tools)
 	ag.SetMaxSteps(20)
 	ag.SetModel(selectModel(provCfg))
+
+	hm := tool.NewHookManager()
+	registerAutoFormatHook(hm)
+	ag.SetHooks(hm)
 
 	// 执行任务
 	fmt.Fprintf(os.Stderr, "Running with %s/%s...\n", provCfg.Name, selectModel(provCfg))
@@ -142,7 +152,7 @@ func runCommand(args []string) {
 	ctx := context.Background()
 	result, err := ag.Run(ctx, task)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\n错误: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -198,6 +208,31 @@ func selectProvider(cfg *config.Config) (*config.ProviderConfig, error) {
 	return cfg.GetProvider(name)
 }
 
+// connectPlugins 按配置连接所有 MCP 插件（stdio 或 SSE），把其工具注册进 tools。
+// 单个插件连接失败不影响启动（打印告警后跳过）。返回 manager（无插件时返回 nil）。
+func connectPlugins(ctx context.Context, plugins []config.PluginConfig, tools *tool.Registry) *mcp.PluginManager {
+	if len(plugins) == 0 {
+		return nil
+	}
+	pm := mcp.NewPluginManager(tools)
+	for _, pc := range plugins {
+		var err error
+		switch pc.Kind() {
+		case "sse":
+			err = pm.ConnectSSE(ctx, pc.Name, pc.URL)
+		case "stdio":
+			err = pm.Connect(pc.Name, pc.Command, pc.Args...)
+		default:
+			fmt.Fprintf(os.Stderr, "Warning: MCP plugin %q has neither command nor url; skipped\n", pc.Name)
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: MCP plugin %q connect failed: %v\n", pc.Name, err)
+		}
+	}
+	return pm
+}
+
 // configureToolPermissions 给文件工具与 bash 接入权限护栏（C2），
 // 并按"工作区内放行"模型配置 Auto 模式的默认白名单（H6）。
 func configureToolPermissions(tools *tool.Registry, perm *control.Permission) {
@@ -229,12 +264,14 @@ func configureToolPermissions(tools *tool.Registry, perm *control.Permission) {
 		if ft, ok := t.(*tool.WriteFileTool); ok {
 			ft.SetRoot(cwd)
 			ft.SetPermissionChecker(perm)
+			ft.SetDiagnoser(tool.GoDiagnoser{})
 		}
 	}
 	if t, ok := tools.Get("edit_file"); ok {
 		if ft, ok := t.(*tool.EditFileTool); ok {
 			ft.SetRoot(cwd)
 			ft.SetPermissionChecker(perm)
+			ft.SetDiagnoser(tool.GoDiagnoser{})
 		}
 	}
 }
@@ -286,22 +323,69 @@ func createProvider(provCfg *config.ProviderConfig) (provider.Provider, error) {
 	})
 }
 
+func registerAutoFormatHook(hm *tool.HookManager) {
+	gofmtPath, err := exec.LookPath("gofmt")
+	if err != nil {
+		return
+	}
+
+	hm.Add(tool.Hook{
+		Name:     "auto-gofmt",
+		Type:     tool.HookPostExecute,
+		ToolName: "write_file",
+		Handler: func(ctx context.Context, call tool.Call, result *tool.Result) error {
+			if result != nil && result.Error != "" {
+				return nil
+			}
+			path, _ := call.Args["path"].(string)
+			if path == "" || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			cmd := exec.CommandContext(ctx, gofmtPath, "-w", path)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("gofmt: %s: %w", strings.TrimSpace(string(output)), err)
+			}
+			return nil
+		},
+	})
+
+	hm.Add(tool.Hook{
+		Name:     "auto-gofmt-edit",
+		Type:     tool.HookPostExecute,
+		ToolName: "edit_file",
+		Handler: func(ctx context.Context, call tool.Call, result *tool.Result) error {
+			if result != nil && result.Error != "" {
+				return nil
+			}
+			path, _ := call.Args["path"].(string)
+			if path == "" || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			cmd := exec.CommandContext(ctx, gofmtPath, "-w", path)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("gofmt: %s: %w", strings.TrimSpace(string(output)), err)
+			}
+			return nil
+		},
+	})
+}
+
 func chatCommand() {
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "配置加载失败: %v\n", err)
 		os.Exit(1)
 	}
 
 	provCfg, err := selectProvider(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Provider 选择失败: %v\n", err)
 		os.Exit(1)
 	}
 
 	p, err := createProvider(provCfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating provider: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Provider 创建失败: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -323,6 +407,9 @@ func chatCommand() {
 	perm := control.NewPermission(control.ModeAuto)
 	configureToolPermissions(tools, perm)
 
+	// 连接配置的 MCP 插件（stdio/SSE）
+	connectPlugins(context.Background(), cfg.Plugins, tools)
+
 	// 初始化会话管理器
 	home, _ := os.UserHomeDir()
 	sessionDir := filepath.Join(home, ".helix", "sessions")
@@ -335,6 +422,11 @@ func chatCommand() {
 	app := ui.NewApp(p, tools)
 	app.SetModel(selectModel(provCfg))
 	app.SetProviders(allProviders)
+	app.AddApprovalGuard(perm)
+
+	hm := tool.NewHookManager()
+	registerAutoFormatHook(hm)
+	app.SetHooks(hm)
 
 	if sessionMgr != nil {
 		app.SetSessionManager(sessionMgr)
@@ -353,7 +445,7 @@ func chatCommand() {
 	program := tea.NewProgram(app, tea.WithAltScreen())
 	app.SetProgram(program)
 	if _, err := program.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "TUI 运行错误: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -415,11 +507,15 @@ func loadEnvFiles() {
 // ExportEnvToSubprocess 将当前环境变量导出到子进程
 // 工具执行（bash 等）时自动继承
 func ExportEnvToSubprocess() []string {
-	relevantKeys := []string{
-		"DEEPSEEK_API_KEY",
-		"MIMO_API_KEY",
-		"OPENAI_API_KEY",
-		"ANTHROPIC_API_KEY",
+	apiKeys := map[string]bool{
+		"DEEPSEEK_API_KEY":   true,
+		"MIMO_API_KEY":       true,
+		"OPENAI_API_KEY":     true,
+		"ANTHROPIC_API_KEY":  true,
+		"TAVILY_API_KEY":     true,
+	}
+
+	shellKeys := []string{
 		"HELIX_PROVIDER",
 		"HELIX_MODEL",
 		"PATH",
@@ -428,12 +524,25 @@ func ExportEnvToSubprocess() []string {
 	}
 
 	env := os.Environ()
-	filtered := make([]string, 0, len(relevantKeys))
+	filtered := make([]string, 0, len(shellKeys))
 
 	for _, e := range env {
-		for _, key := range relevantKeys {
-			if strings.HasPrefix(e, key+"=") {
-				filtered = append(filtered, e)
+		idx := strings.IndexByte(e, '=')
+		if idx < 0 {
+			continue
+		}
+		key := e[:idx]
+		val := e[idx+1:]
+
+		if apiKeys[key] {
+			continue
+		}
+
+		for _, sk := range shellKeys {
+			if key == sk {
+				if val != "" {
+					filtered = append(filtered, e)
+				}
 				break
 			}
 		}
@@ -458,7 +567,7 @@ func dashboardCommand(args []string) {
 
 	server := dashboard.NewServer(addr)
 	if err := server.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Dashboard 启动失败: %v\n", err)
 		os.Exit(1)
 	}
 }
