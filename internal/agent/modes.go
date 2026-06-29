@@ -232,6 +232,7 @@ func (a *MultiAgent) Run(ctx context.Context, task string) (string, error) {
 // RunStream 流式执行任务（仅 Build 模式支持）
 func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string, <-chan error) {
 	ag := New(a.provider, a.tools)
+	ag.SetEventLog(a.eventLog) // 共享 eventLog，聚合内部 Agent 的 token/缓存统计到 UI 状态栏
 	ag.SetMaxSteps(a.maxSteps)
 	ag.SetModel(a.model)
 	ag.SetWorkDir(a.workDir)
@@ -285,6 +286,7 @@ func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string,
 // runBuild Build 模式：完整工具权限
 func (a *MultiAgent) runBuild(ctx context.Context, task string) (string, error) {
 	ag := New(a.provider, a.tools)
+	ag.SetEventLog(a.eventLog)
 	ag.SetMaxSteps(a.maxSteps)
 	ag.SetModel(a.model)
 	ag.SetWorkDir(a.workDir)
@@ -359,6 +361,7 @@ func (a *MultiAgent) runCompose(ctx context.Context, task string) (string, error
 
 	// Compose 使用完整工具集
 	agent := New(a.provider, a.tools)
+	agent.SetEventLog(a.eventLog)
 	agent.SetMaxSteps(a.maxSteps)
 	agent.SetWorkDir(a.workDir)
 	if a.effort != nil {
@@ -382,6 +385,7 @@ func (a *MultiAgent) runMax(ctx context.Context, task string) (string, error) {
 	for i := 0; i < candidates; i++ {
 		go func(idx int) {
 			agent := New(a.provider, a.tools)
+			agent.SetEventLog(a.eventLog)
 			agent.SetMaxSteps(a.maxSteps)
 			agent.SetWorkDir(a.workDir)
 			if a.effort != nil {

@@ -65,6 +65,7 @@ type EventLog struct {
 	maxSize          int
 	cachedTokens     int64 // 累计缓存命中 token 数
 	totalInputTokens int64 // 累计输入 token 数（含缓存命中部分）
+	completionTokens int64 // 累计输出 token 数
 }
 
 // NewEventLog 创建事件日志
@@ -159,6 +160,20 @@ func (l *EventLog) RecordInputTokens(tokens int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.totalInputTokens += tokens
+}
+
+// RecordOutputTokens 累计输出 token 数，用于状态栏实时显示生成 token 计数。
+func (l *EventLog) RecordOutputTokens(tokens int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.completionTokens += tokens
+}
+
+// TokenStats 返回累计输入/输出/缓存命中 token 数，用于状态栏渲染。
+func (l *EventLog) TokenStats() (input, output, cached int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.totalInputTokens, l.completionTokens, l.cachedTokens
 }
 
 // CacheStats 返回累计缓存命中 token 数与累计输入 token 数，用于计算 prefix cache 命中率。

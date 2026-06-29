@@ -106,8 +106,9 @@ type App struct {
 	lastTool    string
 
 	// 流式输出缓冲
-	streamMu  sync.Mutex
-	streamBuf string
+	streamMu   sync.Mutex
+	streamBuf  string
+	streamChars int // 当前步流式已接收字符数，用于实时估算生成 token
 
 	// BubbleTea program reference
 	program *tea.Program
@@ -453,6 +454,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamChunkMsg:
 		a.streamMu.Lock()
 		a.streamBuf += string(msg)
+		a.streamChars += len(msg)
 		buf := a.streamBuf
 		a.streamMu.Unlock()
 		a.viewport.SetContent(a.renderMessages(a.height-8, buf))
@@ -463,6 +465,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.streamMu.Lock()
 		content := a.streamBuf
 		a.streamBuf = ""
+		a.streamChars = 0
 		a.streamMu.Unlock()
 		a.loading = false
 		a.cancelFunc = nil
@@ -1445,9 +1448,12 @@ func (a *App) renderStatusBar() string {
 	contextDisplay := a.renderContextUsage()
 	left := fmt.Sprintf(" %s | %s | Tab:模式 | /:命令", a.provider.Name(), a.model)
 
-	// 右侧分段拼接：context | cache | cost（cache 为空时跳过，避免空分隔符）
+	// 右侧分段拼接：context | tokens | cache | cost（为空时跳过，避免空分隔符）
 	var rightParts []string
 	rightParts = append(rightParts, contextDisplay)
+	if tok := a.renderTokens(); tok != "" {
+		rightParts = append(rightParts, tok)
+	}
 	if cache := a.renderCacheHit(); cache != "" {
 		rightParts = append(rightParts, cache)
 	}
@@ -1477,6 +1483,37 @@ func (a *App) renderCacheHit() string {
 	}
 	pct := cached * 100 / total
 	return fmt.Sprintf("cache: %d%%", pct)
+}
+
+// renderTokens 渲染 token 计数。
+// 显示累计输入/输出 token；流式生成中追加当前步实时估算（基于已接收字符数 / 3）。
+// eventLog 为 nil 或尚无任何 token 时返回空串（状态栏不显示该字段）。
+func (a *App) renderTokens() string {
+	if a.eventLog == nil {
+		return ""
+	}
+	input, output, _ := a.eventLog.TokenStats()
+	if input == 0 && output == 0 {
+		return ""
+	}
+	a.streamMu.Lock()
+	streaming := a.streamChars
+	loading := a.loading
+	a.streamMu.Unlock()
+	out := formatTokens(output)
+	// 流式生成中：在累计输出基础上追加当前步实时估算，让用户看到 token 在涨
+	if loading && streaming > 0 {
+		out = fmt.Sprintf("%s+~%d", out, streaming/3)
+	}
+	return fmt.Sprintf("tok: ↑%s ↓%s", formatTokens(input), out)
+}
+
+// formatTokens 把 token 数格式化为紧凑显示：>=1000 用 "1.2k"，否则原数。
+func formatTokens(n int64) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func (a *App) renderCost() string {

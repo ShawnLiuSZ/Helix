@@ -355,6 +355,7 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 				// 记录 prefix cache 命中统计（独立于成本回调，无 onCost 时也生效）
 				if a.eventLog != nil {
 					a.eventLog.RecordInputTokens(int64(lastUsage.PromptTokens))
+					a.eventLog.RecordOutputTokens(int64(lastUsage.CompletionTokens))
 					if lastUsage.CachedInputTokens > 0 {
 						a.eventLog.LogCacheHit(int64(lastUsage.CachedInputTokens))
 						if a.cacheScheduler != nil {
