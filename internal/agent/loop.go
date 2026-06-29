@@ -508,6 +508,7 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 		// 记录 prefix cache 命中统计（独立于成本回调，无 onCost 时也生效）
 		if a.eventLog != nil {
 			a.eventLog.RecordInputTokens(int64(resp.Usage.PromptTokens))
+			a.eventLog.RecordOutputTokens(int64(resp.Usage.CompletionTokens))
 			if resp.Usage.CachedInputTokens > 0 {
 				a.eventLog.LogCacheHit(int64(resp.Usage.CachedInputTokens))
 				if a.cacheScheduler != nil {

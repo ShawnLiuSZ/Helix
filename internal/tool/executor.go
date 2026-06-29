@@ -158,37 +158,6 @@ func (e *Executor) partition(calls []Call) (read, write []Call) {
 	return
 }
 
-// executeParallel 并行执行（带并发限制），按原始下标返回结果
-func (e *Executor) executeParallel(ctx context.Context, calls []Call, maxParallel int) []*Result {
-	results := make([]*Result, len(calls))
-
-	sem := make(chan struct{}, maxParallel)
-	var wg sync.WaitGroup
-
-	for i, call := range calls {
-		wg.Add(1)
-		go func(idx int, c Call) {
-			defer wg.Done()
-			sem <- struct{}{}        // 获取令牌
-			defer func() { <-sem }() // 释放令牌
-
-			results[idx] = e.executeOne(ctx, c)
-		}(i, call)
-	}
-
-	wg.Wait()
-	return results
-}
-
-// executeSerial 串行执行
-func (e *Executor) executeSerial(ctx context.Context, calls []Call) []*Result {
-	results := make([]*Result, len(calls))
-	for i, call := range calls {
-		results[i] = e.executeOne(ctx, call)
-	}
-	return results
-}
-
 // executeOne 执行单个工具调用
 func (e *Executor) executeOne(ctx context.Context, call Call) *Result {
 	// 守卫链

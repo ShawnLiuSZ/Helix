@@ -254,6 +254,9 @@ func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string,
 	if a.onBudgetExceeded != nil {
 		ag.SetOnBudgetExceeded(a.onBudgetExceeded)
 	}
+	if a.hooks != nil {
+		ag.SetHooks(a.hooks)
+	}
 	for _, g := range a.guards {
 		ag.AddGuard(g)
 	}
@@ -307,6 +310,9 @@ func (a *MultiAgent) runBuild(ctx context.Context, task string) (string, error) 
 	}
 	if a.onBudgetExceeded != nil {
 		ag.SetOnBudgetExceeded(a.onBudgetExceeded)
+	}
+	if a.hooks != nil {
+		ag.SetHooks(a.hooks)
 	}
 	if a.goal.IsEnabled() {
 		ag.SetGoal(a.goal.GetGoal())
@@ -370,6 +376,9 @@ func (a *MultiAgent) runCompose(ctx context.Context, task string) (string, error
 	if a.memory != nil {
 		agent.SetMemory(a.memory)
 	}
+	if a.hooks != nil {
+		agent.SetHooks(a.hooks)
+	}
 	return agent.Run(ctx, task)
 }
 
@@ -390,6 +399,9 @@ func (a *MultiAgent) runMax(ctx context.Context, task string) (string, error) {
 			agent.SetWorkDir(a.workDir)
 			if a.effort != nil {
 				agent.SetEffort(a.effort)
+			}
+			if a.hooks != nil {
+				agent.SetHooks(a.hooks)
 			}
 			r, err := agent.Run(ctx, task)
 			if err != nil {

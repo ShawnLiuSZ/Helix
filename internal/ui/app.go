@@ -78,11 +78,11 @@ type App struct {
 	memMgr *memory.Manager
 
 	// 模型选择状态
-	showModelPicker     bool
-	modelList           []modelPickerEntry
-	modelIdx            int
-	allProviders        []provider.Provider
-	allProviderModels   map[string][]provider.ModelInfo
+	showModelPicker   bool
+	modelList         []modelPickerEntry
+	modelIdx          int
+	allProviders      []provider.Provider
+	allProviderModels map[string][]provider.ModelInfo
 
 	// 成本
 	costMu      sync.Mutex
@@ -95,19 +95,19 @@ type App struct {
 	savedMsgCount int // 已保存的消息数量
 
 	// 上下文使用
-	tokensUsed    int
-	tokensWindow  int
+	tokensUsed   int
+	tokensWindow int
 
 	// Cache 命中率（来自 agent EventLog，nil 时不显示）
 	eventLog *agent.EventLog
 
 	// Agent 活动状态
-	lastStep    int
-	lastTool    string
+	lastStep int
+	lastTool string
 
 	// 流式输出缓冲
-	streamMu   sync.Mutex
-	streamBuf  string
+	streamMu    sync.Mutex
+	streamBuf   string
 	streamChars int // 当前步流式已接收字符数，用于实时估算生成 token
 
 	// BubbleTea program reference
@@ -160,22 +160,22 @@ var allCommands = []string{
 
 // 样式
 var (
-	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	systemStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
-	toolStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	inputStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	suggestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	suggestionSel   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4"))
-	helpStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	loadingStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
-	headerStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Padding(0, 1)
-	statusBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("7")).Padding(0, 1)
-	costGreenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	costYellowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	costRedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	activityStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Italic(true)
+	userStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	assistantStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	systemStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
+	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	inputStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	suggestionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	suggestionSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4"))
+	helpStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	loadingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
+	headerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Padding(0, 1)
+	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("7")).Padding(0, 1)
+	costGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	costYellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	costRedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	activityStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Italic(true)
 	contextWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 
 	approvalTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
@@ -225,16 +225,16 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 	)
 
 	app := &App{
-		agent:          ag,
-		provider:       p,
-		tools:          tools,
-		mode:           agent.ModeBuild,
-		envVars:        loadEnvVars(),
-		skillsMgr:      skillsMgr,
-		memMgr:         memMgr,
-		textArea:       ta,
+		agent:           ag,
+		provider:        p,
+		tools:           tools,
+		mode:            agent.ModeBuild,
+		envVars:         loadEnvVars(),
+		skillsMgr:       skillsMgr,
+		memMgr:          memMgr,
+		textArea:        ta,
 		glamourRenderer: renderer,
-		renderCache:    make(map[string]string),
+		renderCache:     make(map[string]string),
 		messages: []chatMessage{
 			{Role: "welcome", Content: "", Timestamp: time.Now()},
 		},
@@ -260,10 +260,10 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 }
 
 func (a *App) SetSessionManager(mgr *session.Manager) { a.sessionMgr = mgr }
-func (a *App) SetModel(m string)                       { a.model = m; a.agent.SetModel(m) }
-func (a *App) SetWorkDir(d string)                     { a.agent.SetWorkDir(d) }
-func (a *App) SetProgram(p *tea.Program)               { a.program = p }
-func (a *App) SetHooks(hm *tool.HookManager)            { a.agent.SetHooks(hm) }
+func (a *App) SetModel(m string)                      { a.model = m; a.agent.SetModel(m) }
+func (a *App) SetWorkDir(d string)                    { a.agent.SetWorkDir(d) }
+func (a *App) SetProgram(p *tea.Program)              { a.program = p }
+func (a *App) SetHooks(hm *tool.HookManager)          { a.agent.SetHooks(hm) }
 
 // SetEventLog 注入 agent EventLog，用于在状态栏显示 prefix cache 命中率。
 // 传入 nil 则不显示 cache 字段。
@@ -586,10 +586,12 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(a.suggestions) > 0 {
 				// 选中建议后直接执行（无需再按一次回车）
+				// 先取值再清空，否则 nil slice 索引会 panic
+				selected := a.suggestions[a.suggestionIdx]
 				a.textArea.Reset()
 				a.showSuggestions = false
 				a.suggestions = nil
-				return a.handleCommand(a.suggestions[a.suggestionIdx])
+				return a.handleCommand(selected)
 			}
 			return a, nil
 		case "esc":
@@ -1363,9 +1365,9 @@ func (a *App) renderWelcome() string {
 
 	// DNA 双螺旋配色
 	helixStyle := lipgloss.NewStyle().Bold(true)
-	blue := lipgloss.Color("39")  // #00BFFF
-	cyan := lipgloss.Color("43")  // #00CED1
-	dim := lipgloss.Color("24")   // #585858
+	blue := lipgloss.Color("39") // #00BFFF
+	cyan := lipgloss.Color("43") // #00CED1
+	dim := lipgloss.Color("24")  // #585858
 	verStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
 	tipStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 
@@ -1763,7 +1765,8 @@ func (a *App) showEnvVars() (tea.Model, tea.Cmd) {
 	var sb strings.Builder
 	sb.WriteString("环境变量:\n\n")
 	for key, val := range a.envVars {
-		sb.WriteString(fmt.Sprintf("  %s = %s\n", key, maskValue(val)))
+		// val 在 loadEnvVars/set 时已脱敏，此处直接输出，避免二次 mask 导致掩码错乱
+		sb.WriteString(fmt.Sprintf("  %s = %s\n", key, val))
 	}
 	a.messages = append(a.messages, chatMessage{Role: "system", Content: sb.String()})
 	return a, nil
