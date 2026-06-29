@@ -52,10 +52,10 @@ func (e EventType) String() string {
 
 // Event 事件
 type Event struct {
-	Timestamp time.Time         `json:"timestamp"`
-	Type      EventType         `json:"type"`
-	Message   string            `json:"message"`
-	Metadata  map[string]any    `json:"metadata,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+	Type      EventType      `json:"type"`
+	Message   string         `json:"message"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // EventLog 事件日志

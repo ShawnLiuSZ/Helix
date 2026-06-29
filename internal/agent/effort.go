@@ -46,9 +46,9 @@ func ParseEffortLevel(s string) EffortLevel {
 
 // EffortManager 思考强度管理器
 type EffortManager struct {
-	mu          sync.RWMutex
-	level       EffortLevel
-	maxSteps    map[EffortLevel]int
+	mu           sync.RWMutex
+	level        EffortLevel
+	maxSteps     map[EffortLevel]int
 	reasonEffort map[EffortLevel]string
 }
 

@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"sync"
@@ -40,12 +41,12 @@ func (s PluginState) String() string {
 
 // PluginInfo 插件信息
 type PluginInfo struct {
-	Name        string            `json:"name"`
-	Version     string            `json:"version"`
-	Description string            `json:"description"`
-	Author      string            `json:"author"`
-	Dependencies []string         `json:"dependencies,omitempty"`
-	Config      map[string]any    `json:"config,omitempty"`
+	Name         string         `json:"name"`
+	Version      string         `json:"version"`
+	Description  string         `json:"description"`
+	Author       string         `json:"author"`
+	Dependencies []string       `json:"dependencies,omitempty"`
+	Config       map[string]any `json:"config,omitempty"`
 }
 
 // PluginLifecycle 生命周期事件
@@ -64,11 +65,11 @@ const (
 
 // PluginLifecycleManager 插件生命周期管理器
 type PluginLifecycleManager struct {
-	mu       sync.RWMutex
-	plugins  map[string]Plugin
-	infos    map[string]PluginInfo
-	states   map[string]PluginState
-	hooks    []LifecycleHook
+	mu      sync.RWMutex
+	plugins map[string]Plugin
+	infos   map[string]PluginInfo
+	states  map[string]PluginState
+	hooks   []LifecycleHook
 }
 
 // LifecycleHook 生命周期钩子
@@ -172,7 +173,9 @@ func (m *PluginLifecycleManager) triggerHooks(plugin Plugin, event PluginLifecyc
 	m.mu.RUnlock()
 
 	for _, hook := range hooks {
-		hook(plugin, event)
+		if err := hook(plugin, event); err != nil {
+			log.Printf("lifecycle hook for %v failed: %v", event, err)
+		}
 	}
 }
 
@@ -199,10 +202,10 @@ type PluginConfigManager struct {
 
 // PluginConfig 插件配置
 type PluginConfig struct {
-	Name     string         `json:"name"`
-	Version  string         `json:"version"`
-	Enabled  bool           `json:"enabled"`
-	Config   map[string]any `json:"config,omitempty"`
+	Name    string         `json:"name"`
+	Version string         `json:"version"`
+	Enabled bool           `json:"enabled"`
+	Config  map[string]any `json:"config,omitempty"`
 }
 
 // NewPluginConfigManager 创建配置管理器

@@ -13,7 +13,7 @@ type RecallMemoryTool struct {
 }
 
 // SetMemoryProvider 注入记忆检索函数。传入的 fn 应返回当前记忆正文
-//（可为空字符串）；传 nil 表示清除记忆来源。
+// （可为空字符串）；传 nil 表示清除记忆来源。
 func (t *RecallMemoryTool) SetMemoryProvider(fn func() string) {
 	t.memoryFn = fn
 }

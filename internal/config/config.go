@@ -12,13 +12,13 @@ import (
 
 // Config 顶层配置结构
 type Config struct {
-	DefaultProvider string              `toml:"default_provider"`
-	Providers       []ProviderConfig    `toml:"providers"`
-	Plugins         []PluginConfig      `toml:"plugins"`
-	Permissions     PermissionConfig    `toml:"permissions"`
-	Search          SearchConfig        `toml:"search"`
-	Experimental    ExperimentalConfig  `toml:"experimental"`
-	Agent           AgentConfig         `toml:"agent"`
+	DefaultProvider string             `toml:"default_provider"`
+	Providers       []ProviderConfig   `toml:"providers"`
+	Plugins         []PluginConfig     `toml:"plugins"`
+	Permissions     PermissionConfig   `toml:"permissions"`
+	Search          SearchConfig       `toml:"search"`
+	Experimental    ExperimentalConfig `toml:"experimental"`
+	Agent           AgentConfig        `toml:"agent"`
 }
 
 // ProviderConfig 单个 Provider 配置
@@ -251,19 +251,19 @@ func DefaultConfig() *Config {
 		DefaultProvider: "deepseek",
 		Providers: []ProviderConfig{
 			{
-				Name:        "deepseek",
-				DisplayName: "DeepSeek",
-				Kind:        "deepseek",
-				BaseURL:     "https://api.deepseek.com",
-				APIKeyEnv:   "DEEPSEEK_API_KEY",
+				Name:         "deepseek",
+				DisplayName:  "DeepSeek",
+				Kind:         "deepseek",
+				BaseURL:      "https://api.deepseek.com",
+				APIKeyEnv:    "DEEPSEEK_API_KEY",
 				DefaultModel: "deepseek-v4-flash",
 				Models: []ModelConfig{
 					{
-						ID:   "deepseek-v4-flash",
-						Name: "DeepSeek V4 Flash",
-						Cost: CostConfig{Input: 0.14, CachedInput: 0.014, Output: 0.28},
+						ID:            "deepseek-v4-flash",
+						Name:          "DeepSeek V4 Flash",
+						Cost:          CostConfig{Input: 0.14, CachedInput: 0.014, Output: 0.28},
 						ContextWindow: 131072,
-						Capabilities: CapConfig{ToolCall: true, PrefixCache: true},
+						Capabilities:  CapConfig{ToolCall: true, PrefixCache: true},
 					},
 				},
 			},

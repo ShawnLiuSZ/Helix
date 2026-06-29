@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -17,20 +18,20 @@ import (
 
 // SSEClient MCP SSE 客户端（HTTP SSE transport）
 type SSEClient struct {
-	baseURL       string
-	httpClient    *http.Client
-	eventCh       chan SSEEvent
-	mu            sync.Mutex
-	nextID        atomic.Int64
-	serverInfo    ServerInfo
-	tools         []Tool
-	initialized   bool
-	sessionID     string
-	lastDataTime  atomic.Int64
-	notifyCh      chan struct{}
-	reconnecting  atomic.Int32
-	notifyMu      sync.Mutex
-	closeOnce     sync.Once
+	baseURL      string
+	httpClient   *http.Client
+	eventCh      chan SSEEvent
+	mu           sync.Mutex
+	nextID       atomic.Int64
+	serverInfo   ServerInfo
+	tools        []Tool
+	initialized  bool
+	sessionID    string
+	lastDataTime atomic.Int64
+	notifyCh     chan struct{}
+	reconnecting atomic.Int32
+	notifyMu     sync.Mutex
+	closeOnce    sync.Once
 }
 
 // SSEEvent SSE 事件
@@ -292,7 +293,7 @@ func (c *SSEClient) Close() error {
 
 // safeSendEvent 向 eventCh 非阻塞发送事件，recover 防止 Close 后 send-on-closed panic。
 func (c *SSEClient) safeSendEvent(event SSEEvent) {
-	defer func() { recover() }() // 防止 Close 后 send-on-closed channel panic
+	defer func() { _ = recover() }() // 防止 Close 后 send-on-closed channel panic
 	select {
 	case c.eventCh <- event:
 	default:
@@ -418,9 +419,9 @@ func (c *SSEClient) waitForResponseWithRetry(ctx context.Context, id int64) (*Re
 		case event := <-c.eventCh:
 			if event.Event == "message" || event.Event == "" {
 				var msg struct {
-					ID      int64           `json:"id"`
-					Result  json.RawMessage `json:"result"`
-					Error   *RPCError       `json:"error"`
+					ID     int64           `json:"id"`
+					Result json.RawMessage `json:"result"`
+					Error  *RPCError       `json:"error"`
 				}
 				if err := json.Unmarshal([]byte(event.Data), &msg); err == nil {
 					if msg.ID == id {
@@ -461,7 +462,9 @@ func (c *SSEClient) sendNotification(ctx context.Context, method string, params 
 		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
 	}
 
-	c.httpClient.Do(httpReq)
+	if _, err := c.httpClient.Do(httpReq); err != nil {
+		log.Printf("send notification %s failed: %v", method, err)
+	}
 }
 
 // ParseSSEURL 解析 SSE URL

@@ -13,11 +13,11 @@ const (
 
 // 标准方法名
 const (
-	MethodInitialize  = "initialize"
-	MethodListTools   = "tools/list"
-	MethodCallTool    = "tools/call"
+	MethodInitialize    = "initialize"
+	MethodListTools     = "tools/list"
+	MethodCallTool      = "tools/call"
 	MethodListResources = "resources/list"
-	MethodListPrompts = "prompts/list"
+	MethodListPrompts   = "prompts/list"
 )
 
 // Request JSON-RPC 请求
@@ -56,9 +56,9 @@ type Notification struct {
 
 // InitializeParams initialize 请求参数
 type InitializeParams struct {
-	ProtocolVersion string      `json:"protocolVersion"`
-	Capabilities    ClientCaps  `json:"capabilities"`
-	ClientInfo      ClientInfo  `json:"clientInfo"`
+	ProtocolVersion string     `json:"protocolVersion"`
+	Capabilities    ClientCaps `json:"capabilities"`
+	ClientInfo      ClientInfo `json:"clientInfo"`
 }
 
 // ClientCaps 客户端能力
@@ -83,9 +83,9 @@ type ClientInfo struct {
 
 // InitializeResult initialize 响应
 type InitializeResult struct {
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    ServerCaps   `json:"capabilities"`
-	ServerInfo      ServerInfo   `json:"serverInfo"`
+	ProtocolVersion string     `json:"protocolVersion"`
+	Capabilities    ServerCaps `json:"capabilities"`
+	ServerInfo      ServerInfo `json:"serverInfo"`
 }
 
 // ServerCaps 服务器能力

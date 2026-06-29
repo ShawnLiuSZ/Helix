@@ -8,11 +8,11 @@ func TestAllowlist_C1_SubstitutionAndRedirectionDenied(t *testing.T) {
 	a.SetShellCommands([]string{"git", "go", "echo"})
 
 	bypasses := []string{
-		"git $(touch /tmp/pwned)",                  // 命令替换
-		"git `touch /tmp/pwned`",                   // 反引号替换
-		"echo hi>/home/user/.ssh/authorized_keys",  // 重定向写敏感文件
-		"echo hi >> /home/user/.bashrc",            // 追加重定向
-		"git status\nrm file",                      // 换行夹带第二条命令
+		"git $(touch /tmp/pwned)",                 // 命令替换
+		"git `touch /tmp/pwned`",                  // 反引号替换
+		"echo hi>/home/user/.ssh/authorized_keys", // 重定向写敏感文件
+		"echo hi >> /home/user/.bashrc",           // 追加重定向
+		"git status\nrm file",                     // 换行夹带第二条命令
 	}
 	for _, cmd := range bypasses {
 		if a.isShellAllowed(map[string]any{"command": cmd}) {

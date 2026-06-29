@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -465,7 +466,9 @@ func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
 	for _, id := range order {
 		tc := byID[id]
 		if tc.Function.Arguments != "" {
-			json.Unmarshal([]byte(tc.Function.Arguments), &tc.Args)
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &tc.Args); err != nil {
+				log.Printf("unmarshal tool call arguments: %v", err)
+			}
 		}
 		result = append(result, *tc)
 	}

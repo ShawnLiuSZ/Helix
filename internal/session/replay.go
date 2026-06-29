@@ -10,10 +10,10 @@ import (
 
 // Replayer 会话重放器
 type Replayer struct {
-	session  *Session
-	output   io.Writer
-	delay    time.Duration
-	verbose  bool
+	session *Session
+	output  io.Writer
+	delay   time.Duration
+	verbose bool
 }
 
 // NewReplayer 创建会话重放器

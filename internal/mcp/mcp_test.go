@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -303,7 +304,7 @@ func TestMCPTool_Execute(t *testing.T) {
 		client:      client,
 	}
 
-	result, err := tl.Execute(nil, map[string]any{"message": "hello"})
+	result, err := tl.Execute(context.Background(), map[string]any{"message": "hello"})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}

@@ -41,8 +41,8 @@ func (a *Adapter) Create(cfg provider.Config) (provider.Provider, error) {
 	}
 
 	caps := provider.Capabilities{
-		SupportsStreaming: true,
-		SupportsToolCall:  true,
+		SupportsStreaming:    true,
+		SupportsToolCall:     true,
 		MaxToolCallsPerRound: 16,
 	}
 
@@ -75,8 +75,8 @@ type OpenAIProvider struct {
 	cfg    provider.Config
 }
 
-func (p *OpenAIProvider) Name() string                     { return p.name }
-func (p *OpenAIProvider) Models() []provider.ModelInfo      { return p.models }
+func (p *OpenAIProvider) Name() string                        { return p.name }
+func (p *OpenAIProvider) Models() []provider.ModelInfo        { return p.models }
 func (p *OpenAIProvider) Capabilities() provider.Capabilities { return p.caps }
 
 func (p *OpenAIProvider) Cost(modelID string, usage provider.Usage) provider.Cost {
@@ -224,9 +224,9 @@ func parseChatResponse(data []byte) (*provider.ChatResponse, error) {
 				args = nil
 			}
 			resp.ToolCalls = append(resp.ToolCalls, provider.ToolCall{
-				ID:   tc.ID,
+				ID:       tc.ID,
 				Function: provider.ToolCallFunc{Name: tc.Function.Name},
-				Args: args,
+				Args:     args,
 			})
 		}
 	}

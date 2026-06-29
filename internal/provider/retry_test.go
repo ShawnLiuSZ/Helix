@@ -158,9 +158,9 @@ func TestParseRetryAfter_Seconds(t *testing.T) {
 		{"30", 30 * time.Second},
 		{"120", 2 * time.Minute},
 		{"99999", 5 * time.Minute}, // 超过上限截断
-		{"-1", 0},                   // 负值
-		{"", 0},                     // 空
-		{"abc", 0},                  // 非数字
+		{"-1", 0},                  // 负值
+		{"", 0},                    // 空
+		{"abc", 0},                 // 非数字
 	}
 
 	for _, tt := range tests {

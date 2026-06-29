@@ -143,6 +143,7 @@ func (a *Allowlist) isShellAllowed(args map[string]any) bool {
 //   - 双引号内：分隔符（; && || | & > >> < ( )）是字面量；但命令替换 $(...) / 反引号仍然生效，
 //     其内部命令会被作为独立段提取出来校验。
 //   - 引号外：所有分隔符生效；命令替换内部命令同样被提取。
+//
 // 这样既能放行带标点的合法命令（git commit -m "a; b"），又不漏掉任何 bash 真正会执行的命令。
 func splitShellCommand(cmd string) []string {
 	var segments []string

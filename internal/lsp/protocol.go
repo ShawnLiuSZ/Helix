@@ -56,8 +56,8 @@ type TextDocumentContentChangeEvent struct {
 
 // InitializeParams initialize 参数
 type InitializeParams struct {
-	ProcessID    *int              `json:"processId"`
-	RootURI      *string           `json:"rootUri"`
+	ProcessID    *int               `json:"processId"`
+	RootURI      *string            `json:"rootUri"`
 	Capabilities ClientCapabilities `json:"capabilities"`
 }
 
@@ -108,10 +108,10 @@ type InitializeResult struct {
 
 // ServerCapabilities 服务器能力
 type ServerCapabilities struct {
-	TextDocumentSync *TextDocumentSyncOptions `json:"textDocumentSync,omitempty"`
-	CompletionProvider *CompletionOptions     `json:"completionProvider,omitempty"`
-	HoverProvider      bool                   `json:"hoverProvider"`
-	DefinitionProvider bool                   `json:"definitionProvider"`
+	TextDocumentSync   *TextDocumentSyncOptions `json:"textDocumentSync,omitempty"`
+	CompletionProvider *CompletionOptions       `json:"completionProvider,omitempty"`
+	HoverProvider      bool                     `json:"hoverProvider"`
+	DefinitionProvider bool                     `json:"definitionProvider"`
 }
 
 // TextDocumentSyncOptions 同步选项
@@ -153,11 +153,11 @@ type CompletionParams struct {
 
 // CompletionItem 补全项
 type CompletionItem struct {
-	Label      string `json:"label"`
-	Kind       int    `json:"kind,omitempty"`
-	Detail     string `json:"detail,omitempty"`
+	Label         string `json:"label"`
+	Kind          int    `json:"kind,omitempty"`
+	Detail        string `json:"detail,omitempty"`
 	Documentation string `json:"documentation,omitempty"`
-	InsertText string `json:"insertText,omitempty"`
+	InsertText    string `json:"insertText,omitempty"`
 }
 
 // HoverParams hover 参数
@@ -191,9 +191,9 @@ type DocumentSymbolParams struct {
 
 // DocumentSymbol 文档符号
 type DocumentSymbol struct {
-	Name           string            `json:"name"`
-	Kind           int               `json:"kind"`
-	Range          Range             `json:"range"`
-	SelectionRange Range             `json:"selectionRange"`
-	Children       []DocumentSymbol  `json:"children,omitempty"`
+	Name           string           `json:"name"`
+	Kind           int              `json:"kind"`
+	Range          Range            `json:"range"`
+	SelectionRange Range            `json:"selectionRange"`
+	Children       []DocumentSymbol `json:"children,omitempty"`
 }

@@ -109,8 +109,7 @@ func TestSSEClientListToolsEmpty(t *testing.T) {
 	// 未连接时调用应返回错误
 	_, err := client.ListTools(context.Background())
 	if err == nil {
-		// 在某些情况下可能不会返回错误
-		// 但这是预期的行为
+		t.Fatal("expected error for unconnected client")
 	}
 }
 
@@ -119,8 +118,7 @@ func TestSSEClientCallToolEmpty(t *testing.T) {
 	// 未连接时调用应返回错误
 	_, err := client.CallTool(context.Background(), "test", nil)
 	if err == nil {
-		// 在某些情况下可能不会返回错误
-		// 但这是预期的行为
+		t.Fatal("expected error for unconnected client")
 	}
 }
 

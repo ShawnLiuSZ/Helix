@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,13 +232,13 @@ func (d *Discovery) detectLanguages(dir string) []string {
 
 	// 特殊文件名映射
 	fileMap := map[string]string{
-		"go.mod":       "go",
-		"go.sum":       "go",
-		"package.json": "typescript",
-		"Cargo.toml":   "rust",
-		"pom.xml":      "java",
-		"build.gradle": "java",
-		"Gemfile":      "ruby",
+		"go.mod":        "go",
+		"go.sum":        "go",
+		"package.json":  "typescript",
+		"Cargo.toml":    "rust",
+		"pom.xml":       "java",
+		"build.gradle":  "java",
+		"Gemfile":       "ruby",
 		"composer.json": "php",
 		"pubspec.yaml":  "dart",
 		"mix.exs":       "elixir",
@@ -246,7 +247,7 @@ func (d *Discovery) detectLanguages(dir string) []string {
 	}
 
 	// 遍历目录（最多 2 层）
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -280,7 +281,9 @@ func (d *Discovery) detectLanguages(dir string) []string {
 		}
 
 		return nil
-	})
+	}); err != nil {
+		log.Printf("detect languages walk %q: %v", dir, err)
+	}
 
 	// 按数量排序
 	var langs []string

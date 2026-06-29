@@ -167,9 +167,9 @@ func (t *GitDiffTool) Schema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: map[string]Property{
-			"path":       {Type: "string", Description: "Optional file path to filter diff"},
-			"staged":     {Type: "boolean", Description: "Show staged changes instead of working tree"},
-			"max_lines":  {Type: "integer", Description: "Max output lines (default 500)"},
+			"path":      {Type: "string", Description: "Optional file path to filter diff"},
+			"staged":    {Type: "boolean", Description: "Show staged changes instead of working tree"},
+			"max_lines": {Type: "integer", Description: "Max output lines (default 500)"},
 		},
 	}
 }

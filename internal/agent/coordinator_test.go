@@ -13,12 +13,12 @@ import (
 // TestNewReadOnlyRegistry 验证从完整 registry 过滤出的只读 registry 只含 IsReadOnly 的工具。
 func TestNewReadOnlyRegistry(t *testing.T) {
 	r := tool.NewRegistry()
-	r.Register(&tool.ReadFileTool{})   // read-only
-	r.Register(&tool.GrepTool{})       // read-only
-	r.Register(&tool.GlobTool{})       // read-only
-	r.Register(&tool.WriteFileTool{})  // write
-	r.Register(&tool.EditFileTool{})   // write
-	r.Register(&tool.BashTool{})       // write（能执行任意命令）
+	r.Register(&tool.ReadFileTool{})  // read-only
+	r.Register(&tool.GrepTool{})      // read-only
+	r.Register(&tool.GlobTool{})      // read-only
+	r.Register(&tool.WriteFileTool{}) // write
+	r.Register(&tool.EditFileTool{})  // write
+	r.Register(&tool.BashTool{})      // write（能执行任意命令）
 
 	ro := newReadOnlyRegistry(r)
 	tools := ro.List()
@@ -37,11 +37,11 @@ func TestNewReadOnlyRegistry(t *testing.T) {
 func TestCoordinator_PlannerReadOnlyTools(t *testing.T) {
 	p := testutil.NewStubProvider(nil)
 	r := tool.NewRegistry()
-	r.Register(&tool.ReadFileTool{})   // read-only
-	r.Register(&tool.GrepTool{})       // read-only
-	r.Register(&tool.WriteFileTool{})  // write
-	r.Register(&tool.EditFileTool{})   // write
-	r.Register(&tool.BashTool{})       // write
+	r.Register(&tool.ReadFileTool{})  // read-only
+	r.Register(&tool.GrepTool{})      // read-only
+	r.Register(&tool.WriteFileTool{}) // write
+	r.Register(&tool.EditFileTool{})  // write
+	r.Register(&tool.BashTool{})      // write
 
 	c := NewCoordinator(p, p, r)
 

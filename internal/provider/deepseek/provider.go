@@ -1,7 +1,6 @@
 package deepseek
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -79,9 +78,9 @@ type DeepSeekProvider struct {
 	cfg    provider.Config
 }
 
-func (p *DeepSeekProvider) Name() string                          { return p.name }
-func (p *DeepSeekProvider) Models() []provider.ModelInfo          { return p.models }
-func (p *DeepSeekProvider) Capabilities() provider.Capabilities   { return p.caps }
+func (p *DeepSeekProvider) Name() string                        { return p.name }
+func (p *DeepSeekProvider) Models() []provider.ModelInfo        { return p.models }
+func (p *DeepSeekProvider) Capabilities() provider.Capabilities { return p.caps }
 
 func (p *DeepSeekProvider) Cost(modelID string, usage provider.Usage) provider.Cost {
 	var modelCost provider.ModelCost
@@ -199,9 +198,9 @@ func parseChatResponse(data []byte) (*provider.ChatResponse, error) {
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			TotalTokens         int `json:"total_tokens"`
+			PromptTokens         int `json:"prompt_tokens"`
+			CompletionTokens     int `json:"completion_tokens"`
+			TotalTokens          int `json:"total_tokens"`
 			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
 		} `json:"usage"`
 	}
@@ -230,9 +229,9 @@ func parseChatResponse(data []byte) (*provider.ChatResponse, error) {
 				args = nil
 			}
 			resp.ToolCalls = append(resp.ToolCalls, provider.ToolCall{
-				ID:   tc.ID,
+				ID:       tc.ID,
 				Function: provider.ToolCallFunc{Name: tc.Function.Name},
-				Args: args,
+				Args:     args,
 			})
 		}
 	}
@@ -306,11 +305,4 @@ func (p *DeepSeekProvider) readDeepSeekStream(resp *http.Response, ch chan<- pro
 
 		return content, toolCalls, usage, extra, false, nil
 	})
-}
-
-// newLineScanner 创建基于 bufio.Scanner 的逐行扫描器
-func newLineScanner(r io.Reader) *bufio.Scanner {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 4096), 1024*1024) // 1MB max line
-	return scanner
 }

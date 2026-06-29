@@ -53,4 +53,4 @@ func NewStubToolRegistry() *StubToolRegistry {
 }
 
 func (r *StubToolRegistry) Register(name string, t *StubTool) { r.tools[name] = t }
-func (r *StubToolRegistry) Get(name string) (*StubTool, bool)  { t, ok := r.tools[name]; return t, ok }
+func (r *StubToolRegistry) Get(name string) (*StubTool, bool) { t, ok := r.tools[name]; return t, ok }

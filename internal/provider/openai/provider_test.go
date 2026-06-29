@@ -270,4 +270,3 @@ func TestOpenAIProvider_Chat_AuthHeader(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer sk-test-key")
 	}
 }
-

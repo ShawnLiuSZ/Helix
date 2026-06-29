@@ -17,11 +17,11 @@ type ReviewTool struct {
 
 // PendingEdit 待确认的编辑
 type PendingEdit struct {
-	ID       int
-	File     string
-	OldText  string
-	NewText  string
-	Applied  bool
+	ID      int
+	File    string
+	OldText string
+	NewText string
+	Applied bool
 }
 
 // NewReviewTool 创建编辑预览工具
@@ -209,9 +209,11 @@ func NewReviewEditTool(review *ReviewTool) *ReviewEditTool {
 	return &ReviewEditTool{review: review}
 }
 
-func (t *ReviewEditTool) Name() string        { return "edit_file" }
-func (t *ReviewEditTool) Description() string { return "Make a precise string replacement in a file (with preview)" }
-func (t *ReviewEditTool) IsReadOnly() bool    { return false }
+func (t *ReviewEditTool) Name() string { return "edit_file" }
+func (t *ReviewEditTool) Description() string {
+	return "Make a precise string replacement in a file (with preview)"
+}
+func (t *ReviewEditTool) IsReadOnly() bool { return false }
 
 func (t *ReviewEditTool) Schema() Schema {
 	return Schema{

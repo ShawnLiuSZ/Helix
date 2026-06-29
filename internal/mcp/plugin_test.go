@@ -25,8 +25,8 @@ func TestPluginState(t *testing.T) {
 
 // mockPlugin 模拟插件
 type mockPlugin struct {
-	info   PluginInfo
-	state  PluginState
+	info    PluginInfo
+	state   PluginState
 	started bool
 }
 

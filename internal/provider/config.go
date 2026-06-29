@@ -13,15 +13,15 @@ type Config struct {
 
 // ModelConfigItem 模型配置项
 type ModelConfigItem struct {
-	ID            string
-	Name          string
-	ContextWindow int
-	CostInput     float64
+	ID              string
+	Name            string
+	ContextWindow   int
+	CostInput       float64
 	CostCachedInput float64
-	CostOutput    float64
-	Reasoning     bool
-	ToolCall      bool
-	PrefixCache   bool
-	Vision        bool
-	Voice         bool
+	CostOutput      float64
+	Reasoning       bool
+	ToolCall        bool
+	PrefixCache     bool
+	Vision          bool
+	Voice           bool
 }

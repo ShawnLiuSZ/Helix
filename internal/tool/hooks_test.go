@@ -331,9 +331,9 @@ func TestExecutor_PostHookAppendsToExistingError(t *testing.T) {
 type stubFailTool struct{}
 
 func (s *stubFailTool) Name() string        { return "fail_tool" }
-func (s *stubFailTool) Description() string  { return "stub" }
-func (s *stubFailTool) Schema() Schema       { return Schema{Type: "object"} }
-func (s *stubFailTool) IsReadOnly() bool     { return true }
+func (s *stubFailTool) Description() string { return "stub" }
+func (s *stubFailTool) Schema() Schema      { return Schema{Type: "object"} }
+func (s *stubFailTool) IsReadOnly() bool    { return true }
 func (s *stubFailTool) Execute(ctx context.Context, args map[string]any) (*Result, error) {
 	return &Result{Error: "tool-error"}, nil
 }

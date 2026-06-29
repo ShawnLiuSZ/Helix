@@ -148,7 +148,7 @@ func TestModelPickerShowsAllProvidersWithArrowMovement(t *testing.T) {
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 
 	t.Logf("textarea value before enter: %q", m.(*App).textArea.Value())
-	
+
 	// 直接调用 handleModelCmd 验证核心逻辑
 	app2 := m.(*App)
 	app2.handleModelCmd([]string{"/model"})
@@ -235,7 +235,7 @@ func TestModelPickerShowsAllProvidersWithArrowMovement(t *testing.T) {
 
 	// 再测试跨 provider 切换 — 直接操作状态模拟
 	app2.showModelPicker = true
-	app2.modelIdx = 2           // 选中 mimo/mimo-v2.5
+	app2.modelIdx = 2 // 选中 mimo/mimo-v2.5
 	app2.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if app2.model != "mimo-v2.5" {
 		t.Errorf("expected model mimo-v2.5 after switching, got %s", app2.model)

@@ -85,10 +85,10 @@ type stubReadTool struct {
 	fn func()
 }
 
-func (s *stubReadTool) Name() string          { return "read_file" }
-func (s *stubReadTool) Description() string   { return "stub" }
-func (s *stubReadTool) Schema() Schema        { return Schema{Type: "object"} }
-func (s *stubReadTool) IsReadOnly() bool      { return true }
+func (s *stubReadTool) Name() string        { return "read_file" }
+func (s *stubReadTool) Description() string { return "stub" }
+func (s *stubReadTool) Schema() Schema      { return Schema{Type: "object"} }
+func (s *stubReadTool) IsReadOnly() bool    { return true }
 func (s *stubReadTool) Execute(ctx context.Context, args map[string]any) (*Result, error) {
 	if s.fn != nil {
 		s.fn()
@@ -137,9 +137,9 @@ func TestExecutor_MixedExecution(t *testing.T) {
 	wt.Execute(context.Background(), map[string]any{"path": path, "content": "hello"})
 
 	results := e.Execute(context.Background(), []Call{
-		{Name: "read_file", Args: map[string]any{"path": path}},   // 只读（并行）
+		{Name: "read_file", Args: map[string]any{"path": path}},                        // 只读（并行）
 		{Name: "write_file", Args: map[string]any{"path": path, "content": "updated"}}, // 写入（串行）
-		{Name: "read_file", Args: map[string]any{"path": path}},   // 只读（并行）
+		{Name: "read_file", Args: map[string]any{"path": path}},                        // 只读（并行）
 	})
 
 	if len(results) != 3 {

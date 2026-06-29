@@ -466,7 +466,7 @@ func (a *MultiAgent) judgeMaxCandidates(ctx context.Context, task string, candid
 	for i, c := range candidates {
 		sb.WriteString(fmt.Sprintf("### Candidate %d\n%s\n\n", i+1, c))
 	}
-	sb.WriteString(fmt.Sprintf("Select the best candidate based on correctness, completeness, and code quality.\n"))
+	sb.WriteString("Select the best candidate based on correctness, completeness, and code quality.\n")
 	sb.WriteString(fmt.Sprintf("Return ONLY the number (1-%d) of the best candidate. No explanation.", len(candidates)))
 
 	resp, err := a.provider.Chat(ctx, &provider.ChatRequest{

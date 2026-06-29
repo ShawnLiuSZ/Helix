@@ -40,11 +40,11 @@ func (a *Adapter) Create(cfg provider.Config) (provider.Provider, error) {
 
 	// MiMo 特性：OAuth 认证、语音支持、推理
 	caps := provider.Capabilities{
-		SupportsReasoning:   true,
-		SupportsToolCall:    true,
-		SupportsStreaming:   true,
-		SupportsVoice:       true,
-		SupportsOAuth:       cfg.AuthMethod == "oauth",
+		SupportsReasoning:    true,
+		SupportsToolCall:     true,
+		SupportsStreaming:    true,
+		SupportsVoice:        true,
+		SupportsOAuth:        cfg.AuthMethod == "oauth",
 		MaxToolCallsPerRound: 16,
 	}
 
@@ -239,9 +239,9 @@ func parseChatResponse(data []byte) (*provider.ChatResponse, error) {
 				args = nil
 			}
 			resp.ToolCalls = append(resp.ToolCalls, provider.ToolCall{
-				ID:   tc.ID,
+				ID:       tc.ID,
 				Function: provider.ToolCallFunc{Name: tc.Function.Name},
-				Args: args,
+				Args:     args,
 			})
 		}
 	}
@@ -311,45 +311,4 @@ func (p *MiMoProvider) readSSEStream(ctx context.Context, resp *http.Response, c
 
 		return content, toolCalls, usage, extra, false, nil
 	})
-}
-
-// lineReader 行读��器
-type lineReader struct {
-	reader io.Reader
-	buf    []byte
-}
-
-func newLineReader(r io.Reader) *lineReader {
-	return &lineReader{reader: r, buf: make([]byte, 0, 4096)}
-}
-
-func (r *lineReader) ReadLine() (string, error) {
-	tmp := make([]byte, 4096)
-	for {
-		n, err := r.reader.Read(tmp)
-		if n > 0 {
-			r.buf = append(r.buf, tmp[:n]...)
-		}
-
-		for i := 0; i < len(r.buf); i++ {
-			if r.buf[i] == '\n' {
-				line := string(r.buf[:i])
-				if i+1 < len(r.buf) {
-					r.buf = r.buf[i+1:]
-				} else {
-					r.buf = r.buf[:0]
-				}
-				return line, nil
-			}
-		}
-
-		if err != nil {
-			if len(r.buf) > 0 {
-				line := string(r.buf)
-				r.buf = r.buf[:0]
-				return line, nil
-			}
-			return "", err
-		}
-	}
 }

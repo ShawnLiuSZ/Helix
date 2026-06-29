@@ -253,7 +253,9 @@ func (s *Store) Count() int {
 	defer s.mu.RUnlock()
 
 	var count int
-	s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&count)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&count); err != nil {
+		return 0
+	}
 	return count
 }
 

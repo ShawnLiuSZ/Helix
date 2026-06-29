@@ -13,11 +13,9 @@ import (
 
 // WSClient WebSocket 客户端
 type WSClient struct {
-	conn   *websocket.Conn
-	hub    *WSHub
-	send   chan []byte
-	mu     sync.Mutex
-	closed bool
+	conn *websocket.Conn
+	hub  *WSHub
+	send chan []byte
 }
 
 // WSHub WebSocket 管理器
@@ -112,16 +110,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if _, ok := w.(http.Hijacker); !ok {
 		// 回退到普通 HTTP 响应（用于测试）
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status": "WebSocket endpoint (test mode - no upgrade)",
 		})
 		return
 	}
 
 	wsHandler := websocket.Handler(func(ws *websocket.Conn) {
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 
-		ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
 		client := &WSClient{
 			conn: ws,
@@ -138,7 +136,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				hub.unregister <- client
 			}()
 			for {
-				ws.SetReadDeadline(time.Now().Add(120 * time.Second))
+				_ = ws.SetReadDeadline(time.Now().Add(120 * time.Second))
 				var msg []byte
 				err := websocket.Message.Receive(ws, &msg)
 				if err != nil {
@@ -154,7 +152,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// 重置写 deadline
-			ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		}
 	})
 

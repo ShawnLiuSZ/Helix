@@ -2,6 +2,7 @@ package tool
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 )
@@ -59,17 +60,24 @@ func (r *Registry) List() []Tool {
 
 // RegisterDefaults 注册所有内置基础工具
 func (r *Registry) RegisterDefaults() {
-	r.Register(&ReadFileTool{})
-	r.Register(&WriteFileTool{})
-	r.Register(&EditFileTool{})
-	r.Register(&BashTool{})
-	r.Register(&GrepTool{})
-	r.Register(&GlobTool{})
-	r.Register(&GitStatusTool{})
-	r.Register(&GitDiffTool{})
-	r.Register(&GitLogTool{})
-	r.Register(&GitCommitTool{})
-	// recall_memory 默认注册为占位工具（返回 "No memory configured."）；
-	// 真正的记忆来源由 agent.SetMemory 通过 SetMemoryProvider 注入。
-	r.Register(&RecallMemoryTool{})
+	defaults := []Tool{
+		&ReadFileTool{},
+		&WriteFileTool{},
+		&EditFileTool{},
+		&BashTool{},
+		&GrepTool{},
+		&GlobTool{},
+		&GitStatusTool{},
+		&GitDiffTool{},
+		&GitLogTool{},
+		&GitCommitTool{},
+		// recall_memory 默认注册为占位工具（返回 "No memory configured."）；
+		// 真正的记忆来源由 agent.SetMemory 通过 SetMemoryProvider 注入。
+		&RecallMemoryTool{},
+	}
+	for _, t := range defaults {
+		if err := r.Register(t); err != nil {
+			log.Printf("register tool %s: %v", t.Name(), err)
+		}
+	}
 }

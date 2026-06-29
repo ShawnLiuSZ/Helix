@@ -34,9 +34,9 @@ Rules:
 //
 // 两个 session 的 messages 互不混合，各自 prepend-only 增长，保持 cache-friendly。
 type Coordinator struct {
-	planner      *Agent  // 规划器（只读工具，独立 session）
-	executor     *Agent  // 执行器（完整工具，独立 session）
-	plannerModel string  // 规划器模型（可选，空则用 executor 模型）
+	planner      *Agent // 规划器（只读工具，独立 session）
+	executor     *Agent // 执行器（完整工具，独立 session）
+	plannerModel string // 规划器模型（可选，空则用 executor 模型）
 }
 
 // NewCoordinator 创建协调器。

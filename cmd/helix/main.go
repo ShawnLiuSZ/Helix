@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -303,17 +304,17 @@ func createProvider(provCfg *config.ProviderConfig) (provider.Provider, error) {
 	models := make([]provider.ModelConfigItem, len(provCfg.Models))
 	for i, m := range provCfg.Models {
 		models[i] = provider.ModelConfigItem{
-			ID:            m.ID,
-			Name:          m.Name,
-			ContextWindow: m.ContextWindow,
-			CostInput:     m.Cost.Input,
+			ID:              m.ID,
+			Name:            m.Name,
+			ContextWindow:   m.ContextWindow,
+			CostInput:       m.Cost.Input,
 			CostCachedInput: m.Cost.CachedInput,
-			CostOutput:    m.Cost.Output,
-			Reasoning:     m.Capabilities.Reasoning,
-			ToolCall:      m.Capabilities.ToolCall,
-			PrefixCache:   m.Capabilities.PrefixCache,
-			Vision:        m.Capabilities.Vision,
-			Voice:         m.Capabilities.Voice,
+			CostOutput:      m.Cost.Output,
+			Reasoning:       m.Capabilities.Reasoning,
+			ToolCall:        m.Capabilities.ToolCall,
+			PrefixCache:     m.Capabilities.PrefixCache,
+			Vision:          m.Capabilities.Vision,
+			Voice:           m.Capabilities.Voice,
 		}
 	}
 
@@ -442,7 +443,9 @@ func chatCommand() {
 		// 如果指定了 --session，恢复该会话
 		if *flagSession != "" {
 			if sess, ok := sessionMgr.Get(*flagSession); ok {
-				sessionMgr.SetActive(*flagSession)
+				if err := sessionMgr.SetActive(*flagSession); err != nil {
+					log.Printf("activate session: %v", err)
+				}
 				app.RestoreSession(sess)
 			} else {
 				fmt.Fprintf(os.Stderr, "Warning: session %q not found, starting new session\n", *flagSession)
@@ -511,11 +514,15 @@ func usage() {
 func loadEnvFiles() {
 	// 1. 项目目录下的 .env 文件
 	cwd, _ := os.Getwd()
-	config.LoadEnvFiles(cwd)
+	if err := config.LoadEnvFiles(cwd); err != nil {
+		log.Printf("load .env files: %v", err)
+	}
 
 	// 2. --env-file 指定的文件（最高优先级，最后加载）
 	if *flagEnvFile != "" {
-		config.LoadEnvFile(*flagEnvFile)
+		if err := config.LoadEnvFile(*flagEnvFile); err != nil {
+			log.Printf("load env file %s: %v", *flagEnvFile, err)
+		}
 	}
 }
 
@@ -523,11 +530,11 @@ func loadEnvFiles() {
 // 工具执行（bash 等）时自动继承
 func ExportEnvToSubprocess() []string {
 	apiKeys := map[string]bool{
-		"DEEPSEEK_API_KEY":   true,
-		"MIMO_API_KEY":       true,
-		"OPENAI_API_KEY":     true,
-		"ANTHROPIC_API_KEY":  true,
-		"TAVILY_API_KEY":     true,
+		"DEEPSEEK_API_KEY":  true,
+		"MIMO_API_KEY":      true,
+		"OPENAI_API_KEY":    true,
+		"ANTHROPIC_API_KEY": true,
+		"TAVILY_API_KEY":    true,
 	}
 
 	shellKeys := []string{

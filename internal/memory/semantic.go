@@ -34,12 +34,12 @@ type SearchResult struct {
 
 // SemanticIndex 语义索引
 type SemanticIndex struct {
-	mu          sync.RWMutex
-	documents   map[string]*Document
-	embeddings  EmbeddingProvider
-	dimensions  int
-	cacheMu     sync.RWMutex        // 保护 embedCache
-	embedCache  map[string][]float64 // content hash → cached embedding
+	mu         sync.RWMutex
+	documents  map[string]*Document
+	embeddings EmbeddingProvider
+	dimensions int
+	cacheMu    sync.RWMutex         // 保护 embedCache
+	embedCache map[string][]float64 // content hash → cached embedding
 }
 
 // NewSemanticIndex 创建语义索引

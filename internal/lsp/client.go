@@ -19,8 +19,8 @@ type Client struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 
-	mu       sync.Mutex
-	nextID   atomic.Int64
+	mu         sync.Mutex
+	nextID     atomic.Int64
 	serverInfo *ServerInfo
 
 	// 响应路由
@@ -105,7 +105,9 @@ func (c *Client) readLoop() {
 		}
 
 		var contentLength int
-		fmt.Sscanf(headerLine, "Content-Length: %d", &contentLength)
+		if _, err := fmt.Sscanf(headerLine, "Content-Length: %d", &contentLength); err != nil {
+			continue
+		}
 		if contentLength <= 0 {
 			continue
 		}
@@ -121,10 +123,10 @@ func (c *Client) readLoop() {
 		}
 
 		var msg struct {
-			ID     *int64         `json:"id"`
-			Method string         `json:"method"`
+			ID     *int64          `json:"id"`
+			Method string          `json:"method"`
 			Result json.RawMessage `json:"result,omitempty"`
-			Error  *LSPError      `json:"error,omitempty"`
+			Error  *LSPError       `json:"error,omitempty"`
 		}
 		if err := json.Unmarshal(body, &msg); err != nil {
 			continue
@@ -253,8 +255,8 @@ func (c *Client) sendNotification(method string, params any) {
 // Close 关闭客户端
 func (c *Client) Close() error {
 	if c.cmd.Process != nil {
-		c.cmd.Process.Kill()
-		c.cmd.Wait()
+		_ = c.cmd.Process.Kill()
+		_ = c.cmd.Wait()
 	}
 	return nil
 }

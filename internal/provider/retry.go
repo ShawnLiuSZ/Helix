@@ -15,10 +15,10 @@ import (
 
 // RetryConfig HTTP 重试配置
 type RetryConfig struct {
-	MaxRetries  int           // 最大重试次数（默认 3）
-	BaseDelay   time.Duration // 基础延迟（默认 1s）
-	MaxDelay    time.Duration // 最大延迟（默认 30s）
-	RetryOn     []int         // 需要重试的 HTTP 状态码
+	MaxRetries int           // 最大重试次数（默认 3）
+	BaseDelay  time.Duration // 基础延迟（默认 1s）
+	MaxDelay   time.Duration // 最大延迟（默认 30s）
+	RetryOn    []int         // 需要重试的 HTTP 状态码
 }
 
 // DefaultRetryConfig 默认重试配置

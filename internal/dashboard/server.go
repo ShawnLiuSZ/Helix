@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -10,9 +11,9 @@ import (
 
 // Server Dashboard HTTP 服务器
 type Server struct {
-	addr   string
-	mux    *http.ServeMux
-	wsHub  *WSHub
+	addr  string
+	mux   *http.ServeMux
+	wsHub *WSHub
 }
 
 // NewServer 创建 Dashboard 服务器
@@ -74,7 +75,9 @@ func (s *Server) Start(ctx context.Context) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("dashboard shutdown: %v", err)
+		}
 	}()
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -35,17 +35,17 @@ type CostController struct {
 	mu sync.Mutex
 
 	// 分层模型策略
-	primaryModel   string // 主模型（flash）
-	fallbackModel  string // 备用模型（pro）
-	useFallback    bool   // 是否使用备用模型
+	primaryModel  string // 主模型（flash）
+	fallbackModel string // 备用模型（pro）
+	useFallback   bool   // 是否使用备用模型
 
 	// 辅助调用模型（摘要、修复等强制低成本）
 	auxModel string
 
 	// 累计成本
-	totalCost     float64
-	sessionCost   float64
-	lastTurnCost  float64
+	totalCost    float64
+	sessionCost  float64
+	lastTurnCost float64
 
 	// 成本阈值
 	greenThreshold  float64 // < 此值为绿色
@@ -58,11 +58,11 @@ type CostController struct {
 // NewCostController 创建成本控制器
 func NewCostController(primaryModel, fallbackModel string) *CostController {
 	return &CostController{
-		primaryModel:     primaryModel,
-		fallbackModel:    fallbackModel,
-		auxModel:         primaryModel, // 辅助调用默认也用 flash
-		greenThreshold:   consts.CostGreenThreshold,
-		yellowThreshold:  consts.CostYellowThreshold,
+		primaryModel:      primaryModel,
+		fallbackModel:     fallbackModel,
+		auxModel:          primaryModel, // 辅助调用默认也用 flash
+		greenThreshold:    consts.CostGreenThreshold,
+		yellowThreshold:   consts.CostYellowThreshold,
 		compressThreshold: 3000,
 	}
 }

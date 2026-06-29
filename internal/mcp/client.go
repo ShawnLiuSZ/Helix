@@ -50,10 +50,10 @@ type Client struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 
-	mu       sync.Mutex
-	nextID   atomic.Int64
-	serverInfo ServerInfo
-	tools     []Tool
+	mu          sync.Mutex
+	nextID      atomic.Int64
+	serverInfo  ServerInfo
+	tools       []Tool
 	initialized bool
 
 	// 响应路由
@@ -62,9 +62,9 @@ type Client struct {
 	done      chan struct{}
 
 	// 重连配置
-	command     string
-	args        []string
-	maxRetries  int
+	command      string
+	args         []string
+	maxRetries   int
 	reconnecting atomic.Bool
 
 	// 连接/关闭串行化锁，防止 Connect/Close/reconnect 并发竞态（L14）
@@ -225,12 +225,12 @@ func (c *Client) retryDelay(attempt int) time.Duration {
 // 可安全重复调用（第二次为 no-op）。
 func (c *Client) cleanup() {
 	if c.stdin != nil {
-		c.stdin.Close()
+		_ = c.stdin.Close()
 		c.stdin = nil
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
-		c.cmd.Wait()
+		_ = c.cmd.Process.Kill()
+		_ = c.cmd.Wait()
 		c.cmd = nil
 	}
 	// 通知所有等待 done 的 goroutine（readLoop、callRaw 中的 select）

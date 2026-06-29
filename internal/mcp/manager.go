@@ -145,7 +145,9 @@ func (m *PluginManager) registerClientTools(name string, client mcpClient) error
 		}
 
 		m.tools[mcpT.name] = mcpT
-		m.registry.Register(mcpT)
+		if err := m.registry.Register(mcpT); err != nil {
+			return fmt.Errorf("register tool %q: %w", mcpT.name, err)
+		}
 	}
 
 	return nil

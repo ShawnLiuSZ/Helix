@@ -121,8 +121,8 @@ func (s *TaskStore) List(statusFilter string) []*TaskItem {
 type TaskTool struct{}
 
 func (t *TaskTool) Name() string        { return "task" }
-func (t *TaskTool) Description() string  { return "Persistent task management" }
-func (t *TaskTool) IsReadOnly() bool     { return false }
+func (t *TaskTool) Description() string { return "Persistent task management" }
+func (t *TaskTool) IsReadOnly() bool    { return false }
 
 func (t *TaskTool) Schema() Schema {
 	return Schema{

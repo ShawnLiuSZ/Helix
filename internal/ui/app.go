@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,8 +66,7 @@ type App struct {
 	activeSess *session.Session
 
 	// 模式
-	mode        agent.Mode
-	modeDisplay string
+	mode agent.Mode
 
 	// 环境变量
 	envVars map[string]string
@@ -85,7 +85,6 @@ type App struct {
 	allProviderModels map[string][]provider.ModelInfo
 
 	// 成本
-	costMu      sync.Mutex
 	costTotal   float64
 	costSession float64
 	costLast    float64
@@ -165,11 +164,8 @@ var (
 	systemStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
 	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	inputStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	suggestionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	suggestionSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4"))
-	helpStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	loadingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
 	headerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Padding(0, 1)
 	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("7")).Padding(0, 1)
 	costGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
@@ -191,7 +187,9 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 
 	// 加载 skills
 	skillsMgr := skills.NewManager()
-	skillsMgr.Load()
+	if err := skillsMgr.Load(); err != nil {
+		log.Printf("load skills: %v", err)
+	}
 	ag.SetSkillsManager(skillsMgr)
 
 	// 接入长期记忆（项目知识/用户偏好注入系统提示）。best-effort：打不开则跳过。
@@ -367,7 +365,9 @@ func (a *App) saveSession() {
 		})
 	}
 	a.savedMsgCount = len(a.messages)
-	a.sessionMgr.Save(a.activeSess.ID)
+	if err := a.sessionMgr.Save(a.activeSess.ID); err != nil {
+		log.Printf("save session: %v", err)
+	}
 }
 
 // RestoreSession 恢复历史会话
@@ -634,11 +634,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case "pgup":
-		a.viewport.HalfViewUp()
+		a.viewport.HalfPageUp()
 		return a, nil
 
 	case "pgdown":
-		a.viewport.HalfViewDown()
+		a.viewport.HalfPageDown()
 		return a, nil
 	}
 
@@ -1105,7 +1105,9 @@ func (a *App) handleSessionsCmd(parts []string) (tea.Model, tea.Cmd) {
 				})
 				return a, nil
 			}
-			a.sessionMgr.SetActive(parts[2])
+			if err := a.sessionMgr.SetActive(parts[2]); err != nil {
+				log.Printf("activate session: %v", err)
+			}
 			a.RestoreSession(sess)
 			return a, nil
 		}
@@ -1653,7 +1655,7 @@ func (a *App) runAgent(ctx context.Context, input string) tea.Cmd {
 
 // 消息类型
 type streamChunkMsg string
-type streamDoneMsg struct{ cost float64 }
+type streamDoneMsg struct{}
 type streamErrorMsg string
 
 // truncateRunes 按 rune 边界截断字符串，避免切在多字节字符中间

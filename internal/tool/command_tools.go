@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -92,7 +93,9 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 	// 输出超限：立即杀掉整个进程组，避免子进程写满管道阻塞导致 Wait 挂到超时。
 	truncated := len(output) >= maxOutputSize
 	if truncated && cmd.Process != nil {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			log.Printf("kill process group: %v", err)
+		}
 	}
 
 	// 等待命令完成
@@ -156,7 +159,9 @@ func (t *GrepTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 	output, _ := io.ReadAll(io.LimitReader(stdout, maxOutputSize))
 	truncated := len(output) >= maxOutputSize
 	if truncated && cmd.Process != nil {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			log.Printf("kill process group: %v", err)
+		}
 	}
 	waitErr := cmd.Wait()
 
@@ -224,9 +229,13 @@ func (t *GlobTool) Execute(ctx context.Context, args map[string]any) (*Result, e
 	output, _ := io.ReadAll(io.LimitReader(stdout, maxOutputSize))
 	truncated := len(output) >= maxOutputSize
 	if truncated && cmd.Process != nil {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			log.Printf("kill process group: %v", err)
+		}
 	}
-	cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		log.Printf("wait command: %v", err)
+	}
 
 	content := strings.TrimSpace(string(output))
 	if truncated {

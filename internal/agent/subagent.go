@@ -23,24 +23,24 @@ type SubAgent struct {
 	ParentID string
 	Depth    int
 
-	agent    *Agent
-	status   SubAgentStatus
-	result   string
-	err      error
-	mu       sync.Mutex
+	agent      *Agent
+	status     SubAgentStatus
+	result     string
+	err        error
+	mu         sync.Mutex
 	done       chan struct{}
 	finishedAt time.Time
 	ctx        context.Context
-	cancel   context.CancelFunc
-	bus      *MessageBus
-	msgCh    <-chan BusMessage
+	cancel     context.CancelFunc
+	bus        *MessageBus
+	msgCh      <-chan BusMessage
 }
 
 // SubAgentStatus 子 Agent 状态
 type SubAgentStatus int
 
 const (
-	StatusPending   SubAgentStatus = iota
+	StatusPending SubAgentStatus = iota
 	StatusRunning
 	StatusCompleted
 	StatusFailed

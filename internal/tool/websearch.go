@@ -283,9 +283,9 @@ func (s *SearXNGSearch) Search(ctx context.Context, query string, limit int) ([]
 type SearchEngineType string
 
 const (
-	SearchEngineBing     SearchEngineType = "bing"
-	SearchEngineTavily   SearchEngineType = "tavily"
-	SearchEngineSearXNG  SearchEngineType = "searxng"
+	SearchEngineBing    SearchEngineType = "bing"
+	SearchEngineTavily  SearchEngineType = "tavily"
+	SearchEngineSearXNG SearchEngineType = "searxng"
 )
 
 // CreateSearchEngine 创建搜索引擎
