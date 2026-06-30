@@ -51,31 +51,39 @@ func (m *OAuthManager) SetToken(token *OAuthToken) {
 	m.token = token
 }
 
-// GetToken 获取有效 token（自动刷新）
+// GetToken 获取有效 token（自动刷新）。
+// 持锁仅用于读取和更新 token 指针；refreshToken 网络调用在锁外执行，
+// 避免 onRefresh 回调中再调 GetToken 导致死锁。
 func (m *OAuthManager) GetToken(ctx context.Context) (*OAuthToken, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.token == nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("no token set")
 	}
 
-	// 检查是否过期（提前 60 秒刷新）
-	if time.Now().Add(60 * time.Second).After(m.token.ExpiresAt) {
-		if m.token.RefreshToken != "" {
-			newToken, err := m.refreshToken(ctx, m.token.RefreshToken)
-			if err != nil {
-				return nil, fmt.Errorf("refresh token: %w", err)
-			}
-			m.token = newToken
-			if m.onRefresh != nil {
-				if err := m.onRefresh(newToken); err != nil {
-					return nil, fmt.Errorf("refresh callback: %w", err)
-				}
+	needsRefresh := time.Now().Add(60*time.Second).After(m.token.ExpiresAt) && m.token.RefreshToken != ""
+	refreshToken := m.token.RefreshToken
+	m.mu.Unlock()
+
+	if needsRefresh {
+		newToken, err := m.refreshToken(ctx, refreshToken)
+		if err != nil {
+			return nil, fmt.Errorf("refresh token: %w", err)
+		}
+
+		m.mu.Lock()
+		m.token = newToken
+		m.mu.Unlock()
+
+		if m.onRefresh != nil {
+			if err := m.onRefresh(newToken); err != nil {
+				return nil, fmt.Errorf("refresh callback: %w", err)
 			}
 		}
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.token, nil
 }
 

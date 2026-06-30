@@ -162,6 +162,11 @@ func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
 		default:
 		}
 
+		if attempts > maxAttempts {
+			log.Printf("SSE client: max reconnect attempts (%d) exceeded, giving up", maxAttempts)
+			return
+		}
+
 		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 		if err != nil {
 			delay, attempts = c.reconnectWithBackoff(ctx, delay, initialDelay, maxDelay, multiplier, jitterPct, maxAttempts, &attempts)

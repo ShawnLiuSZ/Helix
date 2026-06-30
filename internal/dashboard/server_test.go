@@ -48,10 +48,49 @@ func TestHandleIndex(t *testing.T) {
 	}
 }
 
-func TestHandleSessions(t *testing.T) {
+func TestAPIRequiresAuth(t *testing.T) {
+	s := NewServer(":0")
+
+	for _, path := range []string{"/api/sessions", "/api/cost", "/api/status"} {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		s.mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s without token: status = %d, want %d", path, w.Code, http.StatusForbidden)
+		}
+	}
+}
+
+func TestAPIWithValidToken(t *testing.T) {
+	s := NewServer(":0")
+
+	req := httptest.NewRequest("GET", "/api/sessions?token="+s.AuthToken(), nil)
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("handleSessions with valid token: status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestAPIWithBearerToken(t *testing.T) {
 	s := NewServer(":0")
 
 	req := httptest.NewRequest("GET", "/api/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+s.AuthToken())
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("handleSessions with Bearer token: status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestHandleSessions(t *testing.T) {
+	s := NewServer(":0")
+
+	req := httptest.NewRequest("GET", "/api/sessions?token="+s.AuthToken(), nil)
 	w := httptest.NewRecorder()
 	s.mux.ServeHTTP(w, req)
 
@@ -78,7 +117,7 @@ func TestHandleSessions(t *testing.T) {
 func TestHandleCost(t *testing.T) {
 	s := NewServer(":0")
 
-	req := httptest.NewRequest("GET", "/api/cost", nil)
+	req := httptest.NewRequest("GET", "/api/cost?token="+s.AuthToken(), nil)
 	w := httptest.NewRecorder()
 	s.mux.ServeHTTP(w, req)
 
@@ -98,7 +137,7 @@ func TestHandleCost(t *testing.T) {
 func TestHandleStatus(t *testing.T) {
 	s := NewServer(":0")
 
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "/api/status?token="+s.AuthToken(), nil)
 	w := httptest.NewRecorder()
 	s.mux.ServeHTTP(w, req)
 

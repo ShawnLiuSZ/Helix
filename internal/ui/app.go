@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -85,9 +87,9 @@ type App struct {
 	allProviderModels map[string][]provider.ModelInfo
 
 	// 成本
-	costTotal   float64
-	costSession float64
-	costLast    float64
+	costTotal   atomic.Uint64
+	costSession atomic.Uint64
+	costLast    atomic.Uint64
 	costBudget  float64
 
 	// 会话保存状态
@@ -242,14 +244,27 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 	app.eventLog = ag.EventLog()
 
 	ag.SetCostCallback(func(cost float64) {
-		app.costLast = cost
-		app.costSession += cost
-		app.costTotal += cost
-		if app.costBudget > 0 && app.costSession >= app.costBudget && app.cancelFunc != nil {
+		app.costLast.Store(costUint64FromFloat(cost))
+		for {
+			old := app.costSession.Load()
+			newVal := costUint64FromFloat(costFloatFromUint64(old) + cost)
+			if app.costSession.CompareAndSwap(old, newVal) {
+				break
+			}
+		}
+		for {
+			old := app.costTotal.Load()
+			newVal := costUint64FromFloat(costFloatFromUint64(old) + cost)
+			if app.costTotal.CompareAndSwap(old, newVal) {
+				break
+			}
+		}
+		sessionCost := costFloatFromUint64(app.costSession.Load())
+		if app.costBudget > 0 && sessionCost >= app.costBudget && app.cancelFunc != nil {
 			app.cancelFunc()
 			app.messages = append(app.messages, chatMessage{
 				Role:    "system",
-				Content: fmt.Sprintf("预算已用尽 ($%.4f/$%.4f)。使用 /budget <amount> 调整预算。", app.costSession, app.costBudget),
+				Content: fmt.Sprintf("预算已用尽 ($%.4f/$%.4f)。使用 /budget <amount> 调整预算。", sessionCost, app.costBudget),
 			})
 		}
 	})
@@ -812,7 +827,7 @@ Budget:
 		return a, nil
 
 	case "/cost":
-		msg := fmt.Sprintf("会话: $%.4f | 上次: $%.4f | 累计: $%.4f", a.costSession, a.costLast, a.costTotal)
+		msg := fmt.Sprintf("会话: $%.4f | 上次: $%.4f | 累计: $%.4f", costFloatFromUint64(a.costSession.Load()), costFloatFromUint64(a.costLast.Load()), costFloatFromUint64(a.costTotal.Load()))
 		a.messages = append(a.messages, chatMessage{Role: "system", Content: msg})
 		return a, nil
 
@@ -918,7 +933,7 @@ func (a *App) handleBudgetCmd(parts []string) (tea.Model, tea.Cmd) {
 		} else {
 			a.messages = append(a.messages, chatMessage{
 				Role:    "system",
-				Content: fmt.Sprintf("预算: $%.2f | 已用: $%.4f | 剩余: $%.4f\n\n使用 /budget clear 清除预算", a.costBudget, a.costSession, a.costBudget-a.costSession),
+				Content: fmt.Sprintf("预算: $%.2f | 已用: $%.4f | 剩余: $%.4f\n\n使用 /budget clear 清除预算", a.costBudget, costFloatFromUint64(a.costSession.Load()), a.costBudget-costFloatFromUint64(a.costSession.Load())),
 			})
 		}
 		return a, nil
@@ -947,7 +962,7 @@ func (a *App) handleBudgetCmd(parts []string) (tea.Model, tea.Cmd) {
 	a.agent.SetCostBudget(amount)
 	a.messages = append(a.messages, chatMessage{
 		Role:    "system",
-		Content: fmt.Sprintf("预算已设置为 $%.2f。当前已用 $%.4f", amount, a.costSession),
+		Content: fmt.Sprintf("预算已设置为 $%.2f。当前已用 $%.4f", amount, costFloatFromUint64(a.costSession.Load())),
 	})
 	return a, nil
 }
@@ -1520,17 +1535,28 @@ func formatTokens(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
 
+// costFloatFromUint64 把 atomic Uint64 中存储的 float64 位模式还原为 float64 值。
+func costFloatFromUint64(v uint64) float64 {
+	return math.Float64frombits(v)
+}
+
+// costUint64FromFloat 把 float64 值转换为 Uint64 位模式，用于 atomic 存储。
+func costUint64FromFloat(v float64) uint64 {
+	return math.Float64bits(v)
+}
+
 func (a *App) renderCost() string {
+	sessionCost := costFloatFromUint64(a.costSession.Load())
 	var display string
 	if a.costBudget > 0 {
-		display = fmt.Sprintf("$%.4f/$%.2f", a.costSession, a.costBudget)
+		display = fmt.Sprintf("$%.4f/$%.2f", sessionCost, a.costBudget)
 	} else {
-		display = fmt.Sprintf("$%.4f", a.costSession)
+		display = fmt.Sprintf("$%.4f", sessionCost)
 	}
-	if a.costSession < consts.CostGreenThreshold {
+	if sessionCost < consts.CostGreenThreshold {
 		return costGreenStyle.Render(display)
 	}
-	if a.costSession < consts.CostYellowThreshold {
+	if sessionCost < consts.CostYellowThreshold {
 		return costYellowStyle.Render(display)
 	}
 	return costRedStyle.Render(display)
@@ -1591,7 +1617,7 @@ func renderWriteDiff(pw *pendingWrite) string {
 	}
 	for _, l := range lines {
 		sb.WriteString(diffAddStyle.Render("  + " + l))
-		sb.WriteString("\n	")
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }

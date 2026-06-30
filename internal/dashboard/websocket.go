@@ -92,8 +92,11 @@ func (h *WSHub) ClientCount() int {
 
 // handleWebSocket 处理 WebSocket 连接（带安全检查）
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// CheckOrigin 白名单：只允许同源连接。
-	// 默认拒绝：缺失/空 Origin 头也必须拒绝（否则非浏览器客户端可绕过 CSWSH 防护）。
+	if !s.isValidToken(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
 	origin := r.Header.Get("Origin")
 	if !s.isAllowedOrigin(origin) {
 		http.Error(w, "Origin not allowed", http.StatusForbidden)

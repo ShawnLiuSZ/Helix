@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// R2: Origin 校验必须按精确 host 匹配，前缀匹配会被 http://localhost.evil.com 绕过（CSWSH）。
 func TestIsAllowedOrigin_ExactHost(t *testing.T) {
 	s := &Server{}
 	cases := []struct {
@@ -18,7 +17,6 @@ func TestIsAllowedOrigin_ExactHost(t *testing.T) {
 		{"http://127.0.0.1", true},
 		{"http://127.0.0.1:3000", true},
 		{"https://localhost", true},
-		// 以下为前缀绕过攻击，必须拒绝：
 		{"http://localhost.evil.com", false},
 		{"http://127.0.0.1.attacker.com", false},
 		{"http://localhostXSS", false},
@@ -34,8 +32,6 @@ func TestIsAllowedOrigin_ExactHost(t *testing.T) {
 	}
 }
 
-// R2 (residual): 缺失/空 Origin 头必须默认拒绝。原实现 `origin != "" && ...`
-// 让无 Origin 头的非浏览器客户端（curl/脚本）无条件放行，是 CSWSH 防护的缺口。
 func TestHandleWebSocket_RejectsMissingOrigin(t *testing.T) {
 	s := NewServer("127.0.0.1:0")
 	cases := []struct {
@@ -52,7 +48,7 @@ func TestHandleWebSocket_RejectsMissingOrigin(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+			req := httptest.NewRequest(http.MethodGet, "/ws?token="+s.AuthToken(), nil)
 			if c.setOrigin {
 				req.Header.Set("Origin", c.origin)
 			}
@@ -63,5 +59,16 @@ func TestHandleWebSocket_RejectsMissingOrigin(t *testing.T) {
 				t.Errorf("status=%d rejected=%v, wantReject=%v", rec.Code, rejected, c.wantReject)
 			}
 		})
+	}
+}
+
+func TestHandleWebSocket_RejectsMissingToken(t *testing.T) {
+	s := NewServer("127.0.0.1:0")
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Origin", "http://localhost:8080")
+	rec := httptest.NewRecorder()
+	s.handleWebSocket(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("WebSocket without token: status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 }
