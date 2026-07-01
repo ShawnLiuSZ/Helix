@@ -76,6 +76,7 @@ const (
 
 // ToolCallDelta 流式工具调用增量
 type ToolCallDelta struct {
+	Index     int // 同一轮中第几个 tool call（OpenAI/DeepSeek 流式格式使用）
 	ID        string
 	Name      string
 	Arguments string // JSON 片段，需要累积

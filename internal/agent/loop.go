@@ -434,25 +434,20 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 }
 
 // mergeToolCallDeltas 合并流式工具调用增量
+// OpenAI/DeepSeek 流式格式通过 index 标识同一 tool call 的多个 delta，
+// 后续 delta 可能只包含 arguments 片段而缺少 id/name，因此必须按 index 合并。
 func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
-	byID := make(map[string]*provider.ToolCall)
-	order := make([]string, 0) // 保持顺序
-	lastID := ""
-
+	byIndex := make(map[int]*provider.ToolCall)
+	var order []int
 	for _, d := range deltas {
-		// 流式传输中后续 chunk 可能没有 ID，使用上一个 ID
-		id := d.ID
-		if id == "" {
-			id = lastID
-		} else {
-			lastID = id
-		}
-
-		tc, ok := byID[id]
+		tc, ok := byIndex[d.Index]
 		if !ok {
-			tc = &provider.ToolCall{ID: id, Function: provider.ToolCallFunc{Name: d.Name}}
-			byID[id] = tc
-			order = append(order, id)
+			tc = &provider.ToolCall{ID: d.ID, Function: provider.ToolCallFunc{Name: d.Name}}
+			byIndex[d.Index] = tc
+			order = append(order, d.Index)
+		}
+		if d.ID != "" {
+			tc.ID = d.ID
 		}
 		if d.Name != "" {
 			tc.Function.Name = d.Name
@@ -463,8 +458,8 @@ func mergeToolCallDeltas(deltas []provider.ToolCallDelta) []provider.ToolCall {
 	}
 
 	result := make([]provider.ToolCall, 0, len(order))
-	for _, id := range order {
-		tc := byID[id]
+	for _, idx := range order {
+		tc := byIndex[idx]
 		if tc.Function.Arguments != "" {
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &tc.Args); err != nil {
 				log.Printf("unmarshal tool call arguments: %v", err)

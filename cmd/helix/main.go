@@ -458,9 +458,9 @@ func chatCommand() {
 		}
 	}
 
-	// 不启用 WithMouseCellMotion：它会接管终端的文本选择，导致无法用鼠标复制内容。
+// 不启用 WithMouseCellMotion：它会接管终端的文本选择，导致无法用鼠标复制内容。
 	// 滚动改用键盘 PageUp/PageDown（已内置支持）。
-	program := tea.NewProgram(app, tea.WithAltScreen())
+	program := tea.NewProgram(app, tea.WithAltScreen(), tea.WithInputTTY())
 	app.SetProgram(program)
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 运行错误: %v\n", err)

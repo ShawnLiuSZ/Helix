@@ -189,6 +189,7 @@ func parseChatResponse(data []byte) (*provider.ChatResponse, error) {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
 				ToolCalls        []struct {
+					Index    int    `json:"index"`
 					ID       string `json:"id"`
 					Function struct {
 						Name      string `json:"name"`
@@ -249,6 +250,7 @@ func (p *DeepSeekProvider) readDeepSeekStream(resp *http.Response, ch chan<- pro
 					Content          string `json:"content"`
 					ReasoningContent string `json:"reasoning_content"`
 					ToolCalls        []struct {
+						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function struct {
 							Name      string `json:"name"`
@@ -286,6 +288,7 @@ func (p *DeepSeekProvider) readDeepSeekStream(resp *http.Response, ch chan<- pro
 
 			for _, tc := range delta.ToolCalls {
 				toolCalls = append(toolCalls, provider.ToolCallDelta{
+					Index:     tc.Index,
 					ID:        tc.ID,
 					Name:      tc.Function.Name,
 					Arguments: tc.Function.Arguments,

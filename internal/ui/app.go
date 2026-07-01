@@ -166,8 +166,11 @@ var (
 	systemStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
 	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	inputStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	suggestionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	suggestionSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4"))
+	helpStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	loadingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
 	headerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Padding(0, 1)
 	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("7")).Padding(0, 1)
 	costGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
@@ -278,7 +281,7 @@ func (a *App) SetWorkDir(d string)                    { a.agent.SetWorkDir(d) }
 func (a *App) SetProgram(p *tea.Program)              { a.program = p }
 func (a *App) SetHooks(hm *tool.HookManager)          { a.agent.SetHooks(hm) }
 
-// SetEventLog 注入 agent EventLog，用于在状态栏显示 prefix cache 命中率。
+// SetEventLog 注入 agent EventLog,用于在状态栏显示 prefix cache 命中率。
 // 传入 nil 则不显示 cache 字段。
 func (a *App) SetEventLog(l *agent.EventLog) { a.eventLog = l }
 
@@ -491,6 +494,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.processQueue()
 
 	case streamErrorMsg:
+		a.streamMu.Lock()
+		a.streamBuf = ""
+		a.streamMu.Unlock()
 		a.loading = false
 		a.cancelFunc = nil
 		errStr := friendlyError(string(msg))
@@ -1365,8 +1371,11 @@ func (a *App) renderMessages(visibleLines int, streamBuf string) string {
 	}
 
 	// 流式输出缓冲
-	if a.loading && a.streamBuf != "" {
-		rendered := a.renderMarkdown(a.streamBuf)
+	a.streamMu.Lock()
+	buf := a.streamBuf
+	a.streamMu.Unlock()
+	if a.loading && buf != "" {
+		rendered := a.renderMarkdown(buf)
 		for _, line := range strings.Split(rendered, "\n") {
 			sb.WriteString(assistantStyle.Render("  " + line))
 			sb.WriteString("\n")
@@ -1650,32 +1659,34 @@ func renderEditDiff(pw *pendingWrite) string {
 func (a *App) runAgent(ctx context.Context, input string) tea.Cmd {
 	return func() tea.Msg {
 		textCh, errCh := a.agent.RunStream(ctx, input)
+		var streamErr error
 
-		for {
+		for textCh != nil || errCh != nil {
 			select {
 			case text, ok := <-textCh:
 				if !ok {
-					if a.program != nil {
-						a.program.Send(streamDoneMsg{})
-					}
-					return nil
+					textCh = nil
+					break
 				}
 				if a.program != nil {
 					a.program.Send(streamChunkMsg(text))
 				}
 			case err, ok := <-errCh:
-				if ok && err != nil {
-					if a.program != nil {
-						a.program.Send(streamErrorMsg(err.Error()))
-					}
-					return nil
+				if !ok {
+					errCh = nil
+					break
 				}
+				streamErr = err
 				if a.program != nil {
-					a.program.Send(streamDoneMsg{})
+					a.program.Send(streamErrorMsg(err.Error()))
 				}
-				return nil
 			}
 		}
+
+		if streamErr == nil && a.program != nil {
+			a.program.Send(streamDoneMsg{})
+		}
+		return nil
 	}
 }
 
