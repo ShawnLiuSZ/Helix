@@ -13,6 +13,8 @@
 
 [English](README_EN.md) | 简体中文
 
+> **更名公告（2026-07-13）**：本项目原名 **Helix**，于今日正式更名为 **LoomCode**。命令行由 `helix` 变更为 `loom` / `loomcode`（双命令等价），配置目录由 `~/.helix/` 变更为 `~/.loomcode/`。仓库地址暂未 rename，后续将迁移至 `ShawnLiuSZ/loomcode`。
+
 **LoomCode** 是一个纯 CLI 形态、基于 Go 语言的可扩展多模型 Agent 编程工具。融合 [DeepSeek-Reasonix](https://github.com/esengine/DeepSeek-Reasonix) 和 [MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) 的核心优点，为 DeepSeek V4 和 Xiaomi MiMo 大模型提供深度优化，同时支持任意 OpenAI 兼容厂商通过配置文件一键接入。
 
 ---
