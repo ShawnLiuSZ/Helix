@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/ShawnLiuSZ/Helix/internal/consts"
 	"github.com/ShawnLiuSZ/Helix/internal/provider"
@@ -39,12 +40,20 @@ func (a *Adapter) Create(cfg provider.Config) (provider.Provider, error) {
 	}
 
 	// MiMo 特性：OAuth 认证、语音支持、推理
+	// 对齐 DeepSeek 的缓存/修复能力声明：
+	//   - SupportsPrefixCache + CacheTTL 启用 Agent 的 CacheScheduler（loop.go:57），
+	//     使 MiMo 会话也享受稳定前缀带来的 prefix cache 命中收益；
+	//   - NeedsToolRepair 声明 MiMo 流式存在重复 tool-call 发射风险（MiMo-Code 文档记录），
+	//     为后续接入工具调用修复流水线提供门控依据。
 	caps := provider.Capabilities{
 		SupportsReasoning:    true,
 		SupportsToolCall:     true,
+		SupportsPrefixCache:  true,
 		SupportsStreaming:    true,
 		SupportsVoice:        true,
 		SupportsOAuth:        cfg.AuthMethod == "oauth",
+		NeedsToolRepair:      true,
+		CacheTTL:             5 * time.Minute,
 		MaxToolCallsPerRound: 16,
 	}
 

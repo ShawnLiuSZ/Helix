@@ -76,6 +76,15 @@ func TestAdapter_Create(t *testing.T) {
 	if !caps.SupportsVoice {
 		t.Error("SupportsVoice should be true")
 	}
+	if !caps.SupportsPrefixCache {
+		t.Error("SupportsPrefixCache should be true")
+	}
+	if !caps.NeedsToolRepair {
+		t.Error("NeedsToolRepair should be true")
+	}
+	if caps.CacheTTL <= 0 {
+		t.Error("CacheTTL should be > 0 to enable CacheScheduler")
+	}
 }
 
 func TestAdapter_Create_OAuth(t *testing.T) {
