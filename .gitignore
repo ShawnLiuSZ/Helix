@@ -1,6 +1,8 @@
 # Binaries
 bin/
 /loomcode
+/loom
+/helix
 *.exe
 *.dll
 *.so
