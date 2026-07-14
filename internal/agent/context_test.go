@@ -254,3 +254,83 @@ func TestCompactMessages_UnknownWindowNoOp(t *testing.T) {
 		t.Error("messages should be untouched when window unknown")
 	}
 }
+
+// TestTruncateMessages_NoOrphanToolOnBoundary 验证 L6 修复：当 assistant tool_call
+// 位于删除区、但其 tool 结果恰好落在保留区边界时，截断后不得留下 orphan tool 消息
+// （即没有对应 assistant tool_call 的 tool 结果），否则 LLM API 返回 400。
+func TestTruncateMessages_NoOrphanToolOnBoundary(t *testing.T) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "x"}, nil
+	})
+	a := New(p, tool.NewRegistry())
+	a.SetModel("m")
+
+	// 6 条消息：[system, assistant(c1), tool(c1), user, assistant, user]
+	// start=1, keepRecent=4 → 保留区 index 2-5
+	// assistant(c1) 在 index 1（删除区），tool(c1) 在 index 2（保留区边界）
+	// 截断后若 orphan 扫描条件用 < 而非 <=，tool(c1) 会被留下成 orphan
+	pad := strings.Repeat("x", 200) // 每条消息足够长以触发截断
+	a.messages = []provider.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "assistant", ToolCalls: []provider.ToolCall{{ID: "c1"}}, Content: pad},
+		{Role: "tool", ToolCallID: "c1", Content: pad},
+		{Role: "user", Content: pad},
+		{Role: "assistant", Content: pad},
+		{Role: "user", Content: pad},
+	}
+
+	a.truncateMessages(100) // 小窗口强制截断
+
+	// 断言：结果中不存在 orphan tool 消息（tool 消息必须有前置 assistant tool_call）
+	for i, msg := range a.messages {
+		if msg.Role != "tool" {
+			continue
+		}
+		if i == 0 {
+			t.Fatalf("tool message at index 0 has no preceding assistant (orphan)")
+		}
+		prev := a.messages[i-1]
+		if prev.Role != "assistant" || len(prev.ToolCalls) == 0 {
+			t.Fatalf("orphan tool message at index %d: preceding msg is %s, not assistant with tool_calls", i, prev.Role)
+		}
+	}
+}
+
+// TestTruncateMessages_PreservesRecentAndSystem 验证截断后仍保留前导 system 与最近消息。
+func TestTruncateMessages_PreservesRecentAndSystem(t *testing.T) {
+	p := testutil.NewStubProvider(func(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "x"}, nil
+	})
+	a := New(p, tool.NewRegistry())
+	a.SetModel("m")
+
+	pad := strings.Repeat("x", 200)
+	a.messages = []provider.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: pad},
+		{Role: "assistant", ToolCalls: []provider.ToolCall{{ID: "c1"}}, Content: pad},
+		{Role: "tool", ToolCallID: "c1", Content: pad},
+		{Role: "user", Content: "final-user"},
+		{Role: "assistant", Content: "final-asst"},
+		{Role: "user", Content: "tail1"},
+		{Role: "assistant", Content: "tail2"},
+	}
+
+	a.truncateMessages(100)
+
+	if a.messages[0].Role != "system" {
+		t.Errorf("system prompt must be preserved, got %s at index 0", a.messages[0].Role)
+	}
+	// 最近 4 条应保留
+	n := len(a.messages)
+	if n < 4 {
+		t.Fatalf("expected at least 4 messages, got %d", n)
+	}
+	last4 := a.messages[n-4:]
+	expected := []string{"final-user", "final-asst", "tail1", "tail2"}
+	for i, want := range expected {
+		if last4[i].Content != want {
+			t.Errorf("last4[%d] = %q, want %q", i, last4[i].Content, want)
+		}
+	}
+}

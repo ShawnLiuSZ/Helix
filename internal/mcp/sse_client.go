@@ -29,9 +29,10 @@ type SSEClient struct {
 	sessionID    string
 	lastDataTime atomic.Int64
 	notifyCh     chan struct{}
-	reconnecting atomic.Int32
 	notifyMu     sync.Mutex
 	closeOnce    sync.Once
+	lifeCtx      context.Context
+	lifeCancel   context.CancelFunc
 }
 
 // SSEEvent SSE 事件
@@ -53,14 +54,18 @@ func NewSSEClient(baseURL string) *SSEClient {
 
 // Connect 连接并初始化
 func (c *SSEClient) Connect(ctx context.Context) error {
+	// 创建生命周期 ctx，Close() 时取消，让 listenSSE / heartbeatMonitor 退出
+	c.lifeCtx, c.lifeCancel = context.WithCancel(ctx)
+
 	// 1. 获取 SSE 端点
-	endpoint, err := c.discoverEndpoint(ctx)
+	endpoint, err := c.discoverEndpoint(c.lifeCtx)
 	if err != nil {
+		c.lifeCancel()
 		return fmt.Errorf("discover endpoint: %w", err)
 	}
 
-	// 2. 启动 SSE 监听
-	go c.listenSSE(ctx, endpoint)
+	// 2. 启动 SSE 监听（用 lifeCtx，Close 时可取消）
+	go c.listenSSE(c.lifeCtx, endpoint)
 
 	// 3. 发送 initialize
 	initParams := InitializeParams{
@@ -74,13 +79,15 @@ func (c *SSEClient) Connect(ctx context.Context) error {
 		},
 	}
 
-	resp, err := c.call(ctx, MethodInitialize, initParams)
+	resp, err := c.call(c.lifeCtx, MethodInitialize, initParams)
 	if err != nil {
+		c.lifeCancel()
 		return fmt.Errorf("initialize: %w", err)
 	}
 
 	var initResult InitializeResult
 	if err := json.Unmarshal(resp.Result, &initResult); err != nil {
+		c.lifeCancel()
 		return fmt.Errorf("parse init result: %w", err)
 	}
 
@@ -88,7 +95,7 @@ func (c *SSEClient) Connect(ctx context.Context) error {
 	c.initialized = true
 
 	// 4. 发送 initialized 通知
-	c.sendNotification(ctx, "notifications/initialized", nil)
+	c.sendNotification(c.lifeCtx, "notifications/initialized", nil)
 
 	return nil
 }
@@ -201,7 +208,6 @@ func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
 		resp.Body.Close()
 		close(done)
 
-		c.reconnecting.Store(1)
 		c.notifyMu.Lock()
 		close(c.notifyCh)
 		c.notifyCh = make(chan struct{}, 1)
@@ -289,8 +295,12 @@ func (c *SSEClient) readSSEStream(ctx context.Context, body io.Reader) {
 }
 
 // Close 关闭连接。用 sync.Once 防止重复 close panic。
+// 取消 lifeCtx 让 listenSSE / heartbeatMonitor 退出，避免 goroutine 与 HTTP 连接泄漏。
 func (c *SSEClient) Close() error {
 	c.closeOnce.Do(func() {
+		if c.lifeCancel != nil {
+			c.lifeCancel()
+		}
 		close(c.eventCh)
 	})
 	return nil
@@ -361,8 +371,9 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 		return nil, err
 	}
 
+	// 仅在 POST 期间持锁（保护 sessionID 读取、串行化 HTTP 请求），
+	// POST 完成后释放锁再 waitForResponse，避免 30s 等待期间串行化所有并发调用（N2）。
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// 发送 POST 请求
 	data, _ := json.Marshal(req)
@@ -370,6 +381,7 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", postURL, strings.NewReader(string(data)))
 	if err != nil {
+		c.mu.Unlock()
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -378,6 +390,7 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
+	c.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +405,7 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 		}
 	}
 
-	// 否则从 SSE 事件中获取响应
+	// 否则从 SSE 事件中获取响应（不持锁，允许并发等待）
 	return c.waitForResponse(ctx, id)
 }
 

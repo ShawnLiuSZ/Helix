@@ -276,7 +276,9 @@ func (a *Agent) truncateMessages(ctxWindow int) {
 
 		// 防止留下 orphan tool 消息：删除范围之后的连续 tool 结果也要一并带走，
 		// 否则 assistant tool_call 被删但 tool 结果留下，触发 LLM API 400。
-		for roundEnd+1 < len(a.messages)-keepRecent && a.messages[roundEnd+1].Role == "tool" {
+		// 注意：扫描不限制 keepRecent 边界——若 tool 结果落在保留区，它的 assistant
+		// 被删后同样成 orphan，必须一起删除（保留区缩小优于 API 400）。
+		for roundEnd+1 < len(a.messages) && a.messages[roundEnd+1].Role == "tool" {
 			roundEnd++
 		}
 

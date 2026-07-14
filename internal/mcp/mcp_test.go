@@ -142,7 +142,7 @@ func TestClient_ListTools(t *testing.T) {
 	client, cleanup := startMockServer(t)
 	defer cleanup()
 
-	tools, err := client.ListTools()
+	tools, err := client.ListTools(context.Background())
 	if err != nil {
 		t.Fatalf("ListTools error: %v", err)
 	}
@@ -159,9 +159,9 @@ func TestClient_CallTool(t *testing.T) {
 	defer cleanup()
 
 	// 先 list tools（mock server 按顺序响应）
-	client.ListTools()
+	client.ListTools(context.Background())
 
-	result, err := client.CallTool("echo", map[string]any{"message": "hello world"})
+	result, err := client.CallTool(context.Background(), "echo", map[string]any{"message": "hello world"})
 	if err != nil {
 		t.Fatalf("CallTool error: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestMCPTool_Execute(t *testing.T) {
 	client, cleanup := startMockServer(t)
 	defer cleanup()
 
-	client.ListTools()
+	client.ListTools(context.Background())
 
 	tl := &mcpTool{
 		name:        "echo",
@@ -344,7 +344,7 @@ sleep 60
 		t.Errorf("ServerInfo.Name = %q", client.ServerInfo().Name)
 	}
 
-	tools, err := client.ListTools()
+	tools, err := client.ListTools(context.Background())
 	if err != nil {
 		t.Fatalf("ListTools error: %v", err)
 	}
@@ -361,7 +361,7 @@ sleep 60
 	time.Sleep(100 * time.Millisecond)
 
 	// 验证断连后 call 返回错误（由于没有真实重连目标，会失败）
-	_, err = client.CallTool("ping", nil)
+	_, err = client.CallTool(context.Background(), "ping", nil)
 	if err == nil {
 		t.Error("expected error after disconnect")
 	}

@@ -1898,6 +1898,12 @@ func (a *App) handleRewindCmd(parts []string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// agent 运行期间禁止恢复，避免并发写文件导致 TOCTOU 竞态（N6）
+	if a.loading {
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "Agent 正在运行，请等待完成或按 Esc 取消后再执行 /rewind。"})
+		return a, nil
+	}
+
 	// /rewind — 列出最近快照
 	if len(parts) < 2 {
 		checkpoints, err := a.checkpointMgr.List("", 20)

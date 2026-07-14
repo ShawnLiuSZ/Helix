@@ -219,6 +219,24 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// 校验 plugins：name 唯一、command/url 至少有一个（N5）
+	seenPlugin := make(map[string]bool)
+	for i, pl := range c.Plugins {
+		if pl.Name == "" {
+			return fmt.Errorf("plugins[%d]: name is required", i)
+		}
+		if seenPlugin[pl.Name] {
+			return fmt.Errorf("plugins[%d]: duplicate plugin name %q", i, pl.Name)
+		}
+		seenPlugin[pl.Name] = true
+		if pl.Command == "" && pl.URL == "" {
+			return fmt.Errorf("plugin %q: command or url is required", pl.Name)
+		}
+		if pl.URL != "" && !isValidURL(pl.URL) {
+			return fmt.Errorf("plugin %q: url %q is not a valid URL", pl.Name, pl.URL)
+		}
+	}
+
 	return nil
 }
 

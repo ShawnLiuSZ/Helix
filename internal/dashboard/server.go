@@ -115,6 +115,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+		s.wsHub.Stop() // 停止 WSHub 主循环，让 goroutine 退出（N10）
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

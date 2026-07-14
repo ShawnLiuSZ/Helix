@@ -9,21 +9,22 @@ import (
 )
 
 // mcpClient 抽象 stdio 与 SSE(HTTP) 两种传输，使 manager 能用同一套逻辑
-// 发现并注册工具。签名与 stdio Client 一致（不带 ctx），SSE 通过适配器接入。
+// 发现并注册工具。ctx 由调用方传入，支持取消（N4）。
 type mcpClient interface {
-	ListTools() ([]Tool, error)
-	CallTool(name string, args map[string]any) (*CallToolResult, error)
+	ListTools(ctx context.Context) ([]Tool, error)
+	CallTool(ctx context.Context, name string, args map[string]any) (*CallToolResult, error)
 	Close() error
 }
 
 // sseClientAdapter 把基于 ctx 的 SSEClient 适配成 mcpClient。
-// 工具调用用独立的 background ctx（CallTool 内部自带超时）；SSE 监听生命周期由
-// ConnectSSE 传入的 ctx 控制。
+// 工具调用透传调用方 ctx，支持用户取消；SSE 监听生命周期由 ConnectSSE 传入的 ctx 控制。
 type sseClientAdapter struct{ c *SSEClient }
 
-func (s *sseClientAdapter) ListTools() ([]Tool, error) { return s.c.ListTools(context.Background()) }
-func (s *sseClientAdapter) CallTool(name string, args map[string]any) (*CallToolResult, error) {
-	return s.c.CallTool(context.Background(), name, args)
+func (s *sseClientAdapter) ListTools(ctx context.Context) ([]Tool, error) {
+	return s.c.ListTools(ctx)
+}
+func (s *sseClientAdapter) CallTool(ctx context.Context, name string, args map[string]any) (*CallToolResult, error) {
+	return s.c.CallTool(ctx, name, args)
 }
 func (s *sseClientAdapter) Close() error { return s.c.Close() }
 
@@ -52,7 +53,7 @@ func (t *mcpTool) Schema() tool.Schema {
 }
 
 func (t *mcpTool) Execute(ctx context.Context, args map[string]any) (*tool.Result, error) {
-	result, err := t.client.CallTool(t.name, args)
+	result, err := t.client.CallTool(ctx, t.name, args)
 	if err != nil {
 		return nil, fmt.Errorf("mcp call %q: %w", t.name, err)
 	}
@@ -125,7 +126,7 @@ func (m *PluginManager) ConnectSSE(ctx context.Context, name, baseURL string) er
 // registerClientTools 发现 client 的工具并注册到 registry（stdio/SSE 共用）。
 // 调用方需持有 m.mu。失败时回收 client 与登记项。
 func (m *PluginManager) registerClientTools(name string, client mcpClient) error {
-	tools, err := client.ListTools()
+	tools, err := client.ListTools(context.Background())
 	if err != nil {
 		_ = client.Close()
 		delete(m.clients, name)
@@ -175,17 +176,22 @@ func (m *PluginManager) Disconnect(name string) error {
 	return nil
 }
 
-// DisconnectAll 断开所有连接
+// DisconnectAll 断开所有连接。
+// 先在锁内快照 clients 列表并清空 map，再解锁逐个 Close，
+// 避免某个 Close 阻塞（如 stdio 子进程不响应）导致整个 DisconnectAll 卡住（N8）。
 func (m *PluginManager) DisconnectAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	clients := make([]mcpClient, 0, len(m.clients))
 	for name, client := range m.clients {
-		_ = client.Close()
+		clients = append(clients, client)
 		delete(m.clients, name)
 	}
-
 	m.tools = make(map[string]*mcpTool)
+	m.mu.Unlock()
+
+	for _, client := range clients {
+		_ = client.Close()
+	}
 }
 
 // ListPlugins 列出已连接的插件

@@ -34,6 +34,7 @@ type WSHub struct {
 	register   chan *WSClient
 	unregister chan *WSClient
 	mu         sync.RWMutex
+	done       chan struct{}
 }
 
 // NewWSHub 创建 WebSocket 管理器
@@ -43,15 +44,24 @@ func NewWSHub() *WSHub {
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *WSClient),
 		unregister: make(chan *WSClient),
+		done:       make(chan struct{}),
 	}
 	go hub.run()
 	return hub
+}
+
+// Stop 停止 WSHub 主循环，让 goroutine 退出（N10）。
+func (h *WSHub) Stop() {
+	close(h.done)
 }
 
 // run WebSocket 管理器主循环
 func (h *WSHub) run() {
 	for {
 		select {
+		case <-h.done:
+			return
+
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true

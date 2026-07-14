@@ -406,7 +406,8 @@ func (a *Allowlist) isFileWriteAllowed(args map[string]any) bool {
 		if err != nil {
 			continue
 		}
-		if strings.HasPrefix(absPath, allowedAbs) {
+		// 必须精确匹配或匹配到分隔符边界，避免 /home/user/proj 命中 /home/user/project-evil（N3）
+		if absPath == allowedAbs || strings.HasPrefix(absPath, allowedAbs+string(filepath.Separator)) {
 			return true
 		}
 	}
