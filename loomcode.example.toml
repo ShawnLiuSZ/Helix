@@ -1,5 +1,10 @@
 # LoomCode CLI 示例配置
-# 复制此文件为 loomcode.toml 并根据需要修改
+#
+# 推荐位置：~/.loomcode/models.toml 或 ~/.loomcode/models.json
+# 项目级也可使用：./models.toml 或 ./models.json
+# 旧的 loomcode.toml / ~/.loomcode/loomcode.toml 仍兼容，但已弃用。
+#
+# 本文件可直接复制为 ~/.loomcode/models.toml 使用。
 
 # 默认 Provider（可选，不填则使用第一个 provider）
 default_provider = "deepseek"
@@ -13,7 +18,10 @@ name         = "deepseek"
 display_name = "DeepSeek"
 kind         = "deepseek"
 base_url     = "https://api.deepseek.com"
+# 推荐使用 api_key_env，避免把密钥明文写入配置文件
 api_key_env  = "DEEPSEEK_API_KEY"
+# 也可以直接写 api_key（优先级高于 api_key_env）
+# api_key = "sk-xxxxxxxxxxxxxxxx"
 default_model = "deepseek-v4-flash"
 
   [[providers.models]]
@@ -49,12 +57,34 @@ default_model = "deepseek-v4-flash"
 # MiMo Provider（可选）
 # ============================================================
 
+# MiMo 提供两种接入方式，按量付费 API 与 Token Plan 的 base_url 不同：
+#   - 按量付费 API: https://api.xiaomimimo.com/v1    API Key 格式 sk-xxxxx
+#   - Token Plan:   https://token-plan-cn.xiaomimimo.com/v1  API Key 格式 tp-xxxxx
+
 # [[providers]]
 # name         = "mimo"
 # display_name = "MiMo"
 # kind         = "mimo"
-# base_url     = "https://api.mimo.xiaomi.com/v1"
+# base_url     = "https://api.xiaomimimo.com/v1"
 # api_key_env  = "MIMO_API_KEY"
+# default_model = "mimo-v2.5-pro"
+#
+#   [[providers.models]]
+#   id   = "mimo-v2.5-pro"
+#   name = "MiMo V2.5 Pro"
+#   context_window = 262144
+#
+#   [providers.models.capabilities]
+#   reasoning = true
+#   tool_call = true
+#   voice     = true
+
+# [[providers]]
+# name         = "mimo-token-plan"
+# display_name = "MiMo Token Plan"
+# kind         = "mimo"
+# base_url     = "https://token-plan-cn.xiaomimimo.com/v1"
+# api_key_env  = "MIMO_TOKEN_PLAN_KEY"
 # default_model = "mimo-v2.5-pro"
 #
 #   [[providers.models]]

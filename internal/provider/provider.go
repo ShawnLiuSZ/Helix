@@ -19,6 +19,13 @@ type Provider interface {
 	Cost(modelID string, usage Usage) Cost
 }
 
+// TokenCounter is implemented by providers that can count tokens offline.
+type TokenCounter interface {
+	// CountTokens returns the number of tokens in the given text.
+	// It may be used for request-size estimation and budget checks.
+	CountTokens(text string) (int, error)
+}
+
 // Adapter 适配器工厂接口
 type Adapter interface {
 	// Kind 返回适配器类型标识（对应配置中的 kind 字段）
