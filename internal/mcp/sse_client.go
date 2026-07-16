@@ -20,6 +20,7 @@ import (
 type SSEClient struct {
 	baseURL      string
 	httpClient   *http.Client
+	sseClient    *http.Client
 	eventCh      chan SSEEvent
 	mu           sync.Mutex
 	nextID       atomic.Int64
@@ -29,9 +30,10 @@ type SSEClient struct {
 	sessionID    string
 	lastDataTime atomic.Int64
 	notifyCh     chan struct{}
-	reconnecting atomic.Int32
 	notifyMu     sync.Mutex
 	closeOnce    sync.Once
+	lifeCtx      context.Context
+	lifeCancel   context.CancelFunc
 }
 
 // SSEEvent SSE 事件
@@ -44,23 +46,35 @@ type SSEEvent struct {
 // NewSSEClient 创建 SSE 客户端
 func NewSSEClient(baseURL string) *SSEClient {
 	return &SSEClient{
-		baseURL:    strings.TrimSuffix(baseURL, "/"),
+		baseURL: strings.TrimSuffix(baseURL, "/"),
+		// httpClient 用于 POST 请求，保持 30 秒总超时。
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-		eventCh:    make(chan SSEEvent, 100),
-		notifyCh:   make(chan struct{}, 1),
+		// sseClient 用于 SSE 长连接流，不设置总 Timeout，避免 30 秒切断连接。
+		// 仅对响应头设置超时，让心跳逻辑管理流生命周期。
+		sseClient: &http.Client{
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 30 * time.Second,
+			},
+		},
+		eventCh:  make(chan SSEEvent, 100),
+		notifyCh: make(chan struct{}, 1),
 	}
 }
 
 // Connect 连接并初始化
 func (c *SSEClient) Connect(ctx context.Context) error {
+	// 创建生命周期 ctx，Close() 时取消，让 listenSSE / heartbeatMonitor 退出
+	c.lifeCtx, c.lifeCancel = context.WithCancel(ctx)
+
 	// 1. 获取 SSE 端点
-	endpoint, err := c.discoverEndpoint(ctx)
+	endpoint, err := c.discoverEndpoint(c.lifeCtx)
 	if err != nil {
+		c.lifeCancel()
 		return fmt.Errorf("discover endpoint: %w", err)
 	}
 
-	// 2. 启动 SSE 监听
-	go c.listenSSE(ctx, endpoint)
+	// 2. 启动 SSE 监听（用 lifeCtx，Close 时可取消）
+	go c.listenSSE(c.lifeCtx, endpoint)
 
 	// 3. 发送 initialize
 	initParams := InitializeParams{
@@ -74,13 +88,15 @@ func (c *SSEClient) Connect(ctx context.Context) error {
 		},
 	}
 
-	resp, err := c.call(ctx, MethodInitialize, initParams)
+	resp, err := c.call(c.lifeCtx, MethodInitialize, initParams)
 	if err != nil {
+		c.lifeCancel()
 		return fmt.Errorf("initialize: %w", err)
 	}
 
 	var initResult InitializeResult
 	if err := json.Unmarshal(resp.Result, &initResult); err != nil {
+		c.lifeCancel()
 		return fmt.Errorf("parse init result: %w", err)
 	}
 
@@ -88,7 +104,7 @@ func (c *SSEClient) Connect(ctx context.Context) error {
 	c.initialized = true
 
 	// 4. 发送 initialized 通知
-	c.sendNotification(ctx, "notifications/initialized", nil)
+	c.sendNotification(c.lifeCtx, "notifications/initialized", nil)
 
 	return nil
 }
@@ -101,14 +117,14 @@ func (c *SSEClient) discoverEndpoint(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.sseClient.Do(req)
 	if err != nil {
 		// 如果直接访问 /sse 失败，尝试根路径
 		req, err = http.NewRequestWithContext(ctx, "GET", c.baseURL, nil)
 		if err != nil {
 			return "", err
 		}
-		resp, err = c.httpClient.Do(req)
+		resp, err = c.sseClient.Do(req)
 		if err != nil {
 			return "", err
 		}
@@ -173,18 +189,23 @@ func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
 			continue
 		}
 
-		if c.sessionID != "" {
-			req.Header.Set("Mcp-Session-Id", c.sessionID)
+		c.mu.Lock()
+		sid := c.sessionID
+		c.mu.Unlock()
+		if sid != "" {
+			req.Header.Set("Mcp-Session-Id", sid)
 		}
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.sseClient.Do(req)
 		if err != nil {
 			delay, attempts = c.reconnectWithBackoff(ctx, delay, initialDelay, maxDelay, multiplier, jitterPct, maxAttempts, &attempts)
 			continue
 		}
 
 		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+			c.mu.Lock()
 			c.sessionID = sid
+			c.mu.Unlock()
 		}
 
 		attempts = 0
@@ -201,7 +222,6 @@ func (c *SSEClient) listenSSE(ctx context.Context, endpoint string) {
 		resp.Body.Close()
 		close(done)
 
-		c.reconnecting.Store(1)
 		c.notifyMu.Lock()
 		close(c.notifyCh)
 		c.notifyCh = make(chan struct{}, 1)
@@ -274,7 +294,11 @@ func (c *SSEClient) readSSEStream(ctx context.Context, body io.Reader) {
 		if strings.HasPrefix(line, "event:") {
 			event.Event = trimSSEField(line, "event:")
 		} else if strings.HasPrefix(line, "data:") {
-			event.Data = trimSSEField(line, "data:")
+			d := trimSSEField(line, "data:")
+			if event.Data != "" {
+				event.Data += "\n"
+			}
+			event.Data += d
 		} else if strings.HasPrefix(line, "id:") {
 			event.ID = trimSSEField(line, "id:")
 		} else if line == "" {
@@ -289,8 +313,12 @@ func (c *SSEClient) readSSEStream(ctx context.Context, body io.Reader) {
 }
 
 // Close 关闭连接。用 sync.Once 防止重复 close panic。
+// 取消 lifeCtx 让 listenSSE / heartbeatMonitor 退出，避免 goroutine 与 HTTP 连接泄漏。
 func (c *SSEClient) Close() error {
 	c.closeOnce.Do(func() {
+		if c.lifeCancel != nil {
+			c.lifeCancel()
+		}
 		close(c.eventCh)
 	})
 	return nil
@@ -319,6 +347,9 @@ func (c *SSEClient) ServerInfo() ServerInfo {
 
 // ListTools 列出可用工具
 func (c *SSEClient) ListTools(ctx context.Context) ([]Tool, error) {
+	if !c.initialized {
+		return nil, fmt.Errorf("client not connected")
+	}
 	resp, err := c.call(ctx, MethodListTools, nil)
 	if err != nil {
 		return nil, err
@@ -335,6 +366,9 @@ func (c *SSEClient) ListTools(ctx context.Context) ([]Tool, error) {
 
 // CallTool 调用工具
 func (c *SSEClient) CallTool(ctx context.Context, name string, args map[string]any) (*CallToolResult, error) {
+	if !c.initialized {
+		return nil, fmt.Errorf("client not connected")
+	}
 	params := CallToolParams{
 		Name:      name,
 		Arguments: args,
@@ -361,15 +395,21 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 		return nil, err
 	}
 
+	// 仅在 POST 期间持锁（保护 sessionID 读取、串行化 HTTP 请求），
+	// POST 完成后释放锁再 waitForResponse，避免 30s 等待期间串行化所有并发调用（N2）。
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// 发送 POST 请求
-	data, _ := json.Marshal(req)
+	data, err := json.Marshal(req)
+	if err != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
 	postURL := c.baseURL + "/message"
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", postURL, strings.NewReader(string(data)))
 	if err != nil {
+		c.mu.Unlock()
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -378,6 +418,7 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
+	c.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -386,13 +427,17 @@ func (c *SSEClient) call(ctx context.Context, method string, params any) (*Respo
 	// 对于 POST 请求，响应可能直接返回
 	if resp.StatusCode == http.StatusOK {
 		var response Response
-		body, _ := io.ReadAll(resp.Body)
-		if err := json.Unmarshal(body, &response); err == nil {
-			return &response, nil
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read response body: %w", err)
 		}
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, fmt.Errorf("invalid JSON response from MCP server: %w (body: %s)", err, string(body))
+		}
+		return &response, nil
 	}
 
-	// 否则从 SSE 事件中获取响应
+	// 否则从 SSE 事件中获取响应（不持锁，允许并发等待）
 	return c.waitForResponse(ctx, id)
 }
 
@@ -404,7 +449,14 @@ func (c *SSEClient) waitForResponse(ctx context.Context, id int64) (*Response, e
 // waitForResponseWithRetry 等待响应，支持重连后重试。
 // 每次循环重新获取 c.notifyCh，避免重连期间通道被替换后错过信号（L5）。
 func (c *SSEClient) waitForResponseWithRetry(ctx context.Context, id int64) (*Response, error) {
-	timeout := time.After(30 * time.Second)
+	defaultTimeout := 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout := time.Until(deadline)
+		if timeout > 0 {
+			defaultTimeout = timeout
+		}
+	}
+	timeout := time.After(defaultTimeout)
 
 	for {
 		// 每次循环重新获取 notifyCh，防止重连时通道被 close+替换导致等待者错过信号
@@ -451,11 +503,19 @@ func (c *SSEClient) sendNotification(ctx context.Context, method string, params 
 	}
 
 	if params != nil {
-		data, _ := json.Marshal(params)
+		data, err := json.Marshal(params)
+		if err != nil {
+			log.Printf("marshal notification params for %s failed: %v", method, err)
+			return
+		}
 		notif.Params = data
 	}
 
-	data, _ := json.Marshal(notif)
+	data, err := json.Marshal(notif)
+	if err != nil {
+		log.Printf("marshal notification %s failed: %v", method, err)
+		return
+	}
 	postURL := c.baseURL + "/message"
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", postURL, strings.NewReader(string(data)))
@@ -467,9 +527,14 @@ func (c *SSEClient) sendNotification(ctx context.Context, method string, params 
 		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
 	}
 
-	if _, err := c.httpClient.Do(httpReq); err != nil {
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
 		log.Printf("send notification %s failed: %v", method, err)
+		return
 	}
+	// 必须关闭并 drain 响应体，否则连接池中的 TCP 连接无法复用，长期运行会耗尽连接。
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
 
 // ParseSSEURL 解析 SSE URL

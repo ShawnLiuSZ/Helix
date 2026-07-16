@@ -56,8 +56,7 @@ func main() {
 	// 加载 .env 文件
 	loadEnvFiles()
 
-	// 注册环境变量提供者（工具子进程使用）
-	tool.SetEnvProvider(&envProvider{})
+	// 注册任务存储
 	tool.SetTaskStore(tool.NewTaskStore())
 
 	args := flag.Args()
@@ -93,12 +92,86 @@ func main() {
 	}
 }
 
+type runtime struct {
+	cfg     *config.Config
+	provCfg *config.ProviderConfig
+	prov    provider.Provider
+	tools   *tool.Registry
+	perm    *control.Permission
+	trust   *control.WorkspaceTrust
+	plugins *mcp.PluginManager
+	cpMgr   *tool.CheckpointManager
+}
+
+func initRuntime(chatMode bool) (*runtime, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("配置加载失败: %w", err)
+	}
+
+	tool.SetEnvProvider(&envProvider{cfg: cfg})
+
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		cwd = "."
+	}
+
+	// 加载工作区信任配置；首次启动时询问用户是否信任当前工作区。
+	home, _ := os.UserHomeDir()
+	trustPath := filepath.Join(home, ".loomcode", "trust.json")
+	trust := control.NewWorkspaceTrust()
+	if err := trust.Load(trustPath); err != nil {
+		return nil, fmt.Errorf("加载信任配置失败: %w", err)
+	}
+	if !trust.IsTrusted(cwd) && trust.Decision(cwd) == "" {
+		decision, err := control.PromptTrust(cwd)
+		if err != nil {
+			return nil, fmt.Errorf("信任确认失败: %w", err)
+		}
+		if err := trust.SetDecision(cwd, decision); err != nil {
+			return nil, fmt.Errorf("保存信任决策失败: %w", err)
+		}
+	}
+
+	provCfg, err := selectProvider(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("provider 选择失败: %w", err)
+	}
+
+	p, err := createProvider(provCfg)
+	if err != nil {
+		return nil, fmt.Errorf("provider 创建失败: %w", err)
+	}
+
+	tools := tool.NewRegistry()
+	tools.RegisterDefaults()
+
+	perm := control.NewPermission(control.ModeAuto)
+	var cpMgr *tool.CheckpointManager
+	if chatMode {
+		cpMgr = tool.NewCheckpointManager("")
+	}
+	configureToolPermissions(tools, perm, cpMgr, trust)
+
+	pm := connectPlugins(context.Background(), cfg.Plugins, tools)
+
+	return &runtime{
+		cfg:     cfg,
+		provCfg: provCfg,
+		prov:    p,
+		tools:   tools,
+		perm:    perm,
+		trust:   trust,
+		plugins: pm,
+		cpMgr:   cpMgr,
+	}, nil
+}
+
 func runCommand(args []string) {
 	var task string
 	if len(args) > 0 {
 		task = strings.Join(args, " ")
 	} else {
-		// 管道模式：从 stdin 读取
 		task = readStdin()
 	}
 
@@ -107,55 +180,25 @@ func runCommand(args []string) {
 		os.Exit(1)
 	}
 
-	// 加载配置
-	cfg, err := loadConfig()
+	r, err := initRuntime(false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "配置加载失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		fmt.Fprintln(os.Stderr, "提示: 运行 loomcode setup 生成配置文件")
 		os.Exit(1)
 	}
-
-	// 选择 Provider
-	provCfg, err := selectProvider(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Provider 选择失败: %v\n", err)
-		fmt.Fprintln(os.Stderr, "提示: 检查 loomcode.toml 中的 provider 配置")
-		os.Exit(1)
+	if r.plugins != nil {
+		defer r.plugins.DisconnectAll()
 	}
 
-	// 创建 Provider
-	p, err := createProvider(provCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Provider 创建失败: %v\n", err)
-		fmt.Fprintln(os.Stderr, "提示: 检查 API Key 是否已设置 (DEEPSEEK_API_KEY / OPENAI_API_KEY)")
-		os.Exit(1)
-	}
-
-	// 创建工具注册中心
-	tools := tool.NewRegistry()
-	tools.RegisterDefaults()
-
-	// 注入命令沙箱与文件护栏权限检查器
-	perm := control.NewPermission(control.ModeAuto)
-	configureToolPermissions(tools, perm, nil) // run 模式不启用快照
-
-	// 连接配置的 MCP 插件（stdio/SSE）
-	pm := connectPlugins(context.Background(), cfg.Plugins, tools)
-	if pm != nil {
-		defer pm.DisconnectAll()
-	}
-
-	// 创建 Agent
-	ag := agent.New(p, tools)
+	ag := agent.New(r.prov, r.tools)
 	ag.SetMaxSteps(20)
-	ag.SetModel(selectModel(provCfg))
+	ag.SetModel(selectModel(r.provCfg))
 
 	hm := tool.NewHookManager()
 	registerAutoFormatHook(hm)
 	ag.SetHooks(hm)
 
-	// 执行任务
-	fmt.Fprintf(os.Stderr, "Running with %s/%s...\n", provCfg.Name, selectModel(provCfg))
+	fmt.Fprintf(os.Stderr, "Running with %s/%s...\n", r.provCfg.Name, selectModel(r.provCfg))
 	fmt.Fprintln(os.Stderr, "---")
 
 	ctx := context.Background()
@@ -180,19 +223,27 @@ func setupCommand() {
 		os.Exit(1)
 	}
 
-	// 写入 loomcode.toml
-	if err := config.WriteConfig(cfg, "loomcode.toml"); err != nil {
-		fmt.Fprintf(os.Stderr, "写入 loomcode.toml 失败: %v\n", err)
+	// 写入 ~/.loomcode/loomcode.toml（全局配置目录）
+	home, _ := os.UserHomeDir()
+	configDir := filepath.Join(home, ".loomcode")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "创建配置目录失败: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("✓ loomcode.toml 已生成")
+	configPath := filepath.Join(configDir, "loomcode.toml")
+	if err := config.WriteConfig(cfg, configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "写入 %s 失败: %v\n", configPath, err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ %s 已生成\n", configPath)
 
-	// 写入 .env（已存在则追加）
-	if err := config.WriteEnvFile(envVars, ".env"); err != nil {
-		fmt.Fprintf(os.Stderr, "写入 .env 失败: %v\n", err)
+	// 写入 ~/.loomcode/.env（全局，已存在则追加）
+	envPath := filepath.Join(configDir, ".env")
+	if err := config.WriteEnvFile(envVars, envPath); err != nil {
+		fmt.Fprintf(os.Stderr, "写入 %s 失败: %v\n", envPath, err)
 		os.Exit(1)
 	}
-	fmt.Println("✓ .env 已生成")
+	fmt.Printf("✓ %s 已生成\n", envPath)
 
 	// 写出 JSON Schema 供编辑器自动补全/校验
 	if schemaPath, err := config.WriteSchemaFile(); err != nil {
@@ -251,10 +302,40 @@ func connectPlugins(ctx context.Context, plugins []config.PluginConfig, tools *t
 	return pm
 }
 
+// setToolTrust 将 TUI App 作为工作区外文件访问信任检查器注入到文件/Git 工具。
+func setToolTrust(tools *tool.Registry, trust tool.OutsideTrustChecker) {
+	if t, ok := tools.Get("read_file"); ok {
+		if ft, ok := t.(*tool.ReadFileTool); ok {
+			ft.SetTrust(trust)
+		}
+	}
+	if t, ok := tools.Get("write_file"); ok {
+		if ft, ok := t.(*tool.WriteFileTool); ok {
+			ft.SetTrust(trust)
+		}
+	}
+	if t, ok := tools.Get("edit_file"); ok {
+		if ft, ok := t.(*tool.EditFileTool); ok {
+			ft.SetTrust(trust)
+		}
+	}
+	if t, ok := tools.Get("git_diff"); ok {
+		if gt, ok := t.(*tool.GitDiffTool); ok {
+			gt.SetTrust(trust)
+		}
+	}
+	if t, ok := tools.Get("git_log"); ok {
+		if gt, ok := t.(*tool.GitLogTool); ok {
+			gt.SetTrust(trust)
+		}
+	}
+}
+
 // configureToolPermissions 给文件工具与 bash 接入权限护栏（C2），
 // 并按"工作区内放行"模型配置 Auto 模式的默认白名单（H6）。
 // cpMgr 非空时注入到写文件/编辑文件工具，启用编辑快照安全网。
-func configureToolPermissions(tools *tool.Registry, perm *control.Permission, cpMgr *tool.CheckpointManager) {
+// trust 用于工作区外文件访问的临时/永久授权提示。
+func configureToolPermissions(tools *tool.Registry, perm *control.Permission, cpMgr *tool.CheckpointManager, trust *control.WorkspaceTrust) {
 	cwd, err := os.Getwd()
 	if err != nil || cwd == "" {
 		cwd = "."
@@ -277,12 +358,14 @@ func configureToolPermissions(tools *tool.Registry, perm *control.Permission, cp
 		if ft, ok := t.(*tool.ReadFileTool); ok {
 			ft.SetRoot(cwd)
 			ft.SetPermissionChecker(perm)
+			ft.SetTrust(trust)
 		}
 	}
 	if t, ok := tools.Get("write_file"); ok {
 		if ft, ok := t.(*tool.WriteFileTool); ok {
 			ft.SetRoot(cwd)
 			ft.SetPermissionChecker(perm)
+			ft.SetTrust(trust)
 			ft.SetDiagnoser(tool.GoDiagnoser{})
 			if cpMgr != nil {
 				ft.SetCheckpointManager(cpMgr)
@@ -293,12 +376,37 @@ func configureToolPermissions(tools *tool.Registry, perm *control.Permission, cp
 		if ft, ok := t.(*tool.EditFileTool); ok {
 			ft.SetRoot(cwd)
 			ft.SetPermissionChecker(perm)
+			ft.SetTrust(trust)
 			ft.SetDiagnoser(tool.GoDiagnoser{})
 			if cpMgr != nil {
 				ft.SetCheckpointManager(cpMgr)
 			}
 		}
 	}
+	if t, ok := tools.Get("git_diff"); ok {
+		if gt, ok := t.(*tool.GitDiffTool); ok {
+			gt.SetRoot(cwd)
+			gt.SetTrust(trust)
+		}
+	}
+	if t, ok := tools.Get("git_log"); ok {
+		if gt, ok := t.(*tool.GitLogTool); ok {
+			gt.SetRoot(cwd)
+			gt.SetTrust(trust)
+		}
+	}
+}
+
+// resolveAPIKey 解析 Provider 的 API Key。
+// 若配置中直接填写 api_key 则优先使用；否则从 api_key_env 指定的环境变量读取。
+func resolveAPIKey(provCfg *config.ProviderConfig) string {
+	if provCfg.APIKey != "" {
+		return provCfg.APIKey
+	}
+	if provCfg.APIKeyEnv != "" {
+		return os.Getenv(provCfg.APIKeyEnv)
+	}
+	return ""
 }
 
 func selectModel(provCfg *config.ProviderConfig) string {
@@ -337,11 +445,13 @@ func createProvider(provCfg *config.ProviderConfig) (provider.Provider, error) {
 		}
 	}
 
+	apiKey := resolveAPIKey(provCfg)
+
 	return reg.Create(provCfg.Kind, provider.Config{
 		Name:         provCfg.Name,
 		DisplayName:  provCfg.DisplayName,
 		BaseURL:      provCfg.BaseURL,
-		APIKey:       os.Getenv(provCfg.APIKeyEnv),
+		APIKey:       apiKey,
 		AuthMethod:   provCfg.AuthMethod,
 		DefaultModel: provCfg.DefaultModel,
 		Models:       models,
@@ -354,92 +464,56 @@ func registerAutoFormatHook(hm *tool.HookManager) {
 		return
 	}
 
-	hm.Add(tool.Hook{
-		Name:     "auto-gofmt",
-		Type:     tool.HookPostExecute,
-		ToolName: "write_file",
-		Handler: func(ctx context.Context, call tool.Call, result *tool.Result) error {
-			if result != nil && result.Error != "" {
-				return nil
-			}
-			path, _ := call.Args["path"].(string)
-			if path == "" || !strings.HasSuffix(path, ".go") {
-				return nil
-			}
-			cmd := exec.CommandContext(ctx, gofmtPath, "-w", path)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("gofmt: %s: %w", strings.TrimSpace(string(output)), err)
-			}
+	gofmtHandler := func(ctx context.Context, call tool.Call, result *tool.Result) error {
+		if result != nil && result.Error != "" {
 			return nil
-		},
-	})
+		}
+		path, _ := call.Args["path"].(string)
+		if path == "" || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		cmd := exec.CommandContext(ctx, gofmtPath, "-w", path)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("gofmt: %s: %w", strings.TrimSpace(string(output)), err)
+		}
+		return nil
+	}
 
-	hm.Add(tool.Hook{
-		Name:     "auto-gofmt-edit",
-		Type:     tool.HookPostExecute,
-		ToolName: "edit_file",
-		Handler: func(ctx context.Context, call tool.Call, result *tool.Result) error {
-			if result != nil && result.Error != "" {
-				return nil
-			}
-			path, _ := call.Args["path"].(string)
-			if path == "" || !strings.HasSuffix(path, ".go") {
-				return nil
-			}
-			cmd := exec.CommandContext(ctx, gofmtPath, "-w", path)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("gofmt: %s: %w", strings.TrimSpace(string(output)), err)
-			}
-			return nil
-		},
-	})
+	makeGofmtHook := func(toolName string) tool.Hook {
+		return tool.Hook{
+			Name:     "auto-gofmt-" + toolName,
+			Type:     tool.HookPostExecute,
+			ToolName: toolName,
+			Handler:  gofmtHandler,
+		}
+	}
+
+	hm.Add(makeGofmtHook("write_file"))
+	hm.Add(makeGofmtHook("edit_file"))
 }
 
 func chatCommand() {
-	cfg, err := loadConfig()
+	r, err := initRuntime(true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "配置加载失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-
-	provCfg, err := selectProvider(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Provider 选择失败: %v\n", err)
-		os.Exit(1)
+	if r.plugins != nil {
+		defer r.plugins.DisconnectAll()
 	}
 
-	p, err := createProvider(provCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Provider 创建失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 创建所有 provider（用于 /model 跨 provider 切换）
-	allProviders := []provider.Provider{p}
-	for _, pc := range cfg.Providers {
-		if pc.Name == provCfg.Name {
-			continue // 跳过当前 provider（已经创建）
+	allProviders := []provider.Provider{r.prov}
+	for _, pc := range r.cfg.Providers {
+		if pc.Name == r.provCfg.Name {
+			continue
 		}
 		if op, err := createProvider(&pc); err == nil {
 			allProviders = append(allProviders, op)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: provider %q 创建失败，已跳过: %v\n", pc.Name, err)
 		}
 	}
 
-	tools := tool.NewRegistry()
-	tools.RegisterDefaults()
-
-	// 注入命令沙箱与文件护栏权限检查器 + 编辑快照安全网
-	perm := control.NewPermission(control.ModeAuto)
-	cpMgr := tool.NewCheckpointManager("") // chat 模式启用快照
-	configureToolPermissions(tools, perm, cpMgr)
-
-	// 连接配置的 MCP 插件（stdio/SSE）
-	chatPM := connectPlugins(context.Background(), cfg.Plugins, tools)
-	if chatPM != nil {
-		defer chatPM.DisconnectAll()
-	}
-
-	// 初始化会话管理器
 	home, _ := os.UserHomeDir()
 	sessionDir := filepath.Join(home, ".loomcode", "sessions")
 	sessionMgr, err := session.NewManager(sessionDir)
@@ -447,17 +521,19 @@ func chatCommand() {
 		fmt.Fprintf(os.Stderr, "Warning: session manager init failed: %v\n", err)
 	}
 
-	// 把会话管理器注入 list_sessions / read_session 工具，实现跨会话上下文能力。
 	if sessionMgr != nil {
-		tool.SetSessionManagerForTools(tools, sessionMgr)
+		tool.SetSessionManagerForTools(r.tools, sessionMgr)
 	}
 
-	// 启动 TUI
-	app := ui.NewApp(p, tools)
-	app.SetModel(selectModel(provCfg))
+	app := ui.NewApp(r.prov, r.tools)
+	app.SetModel(selectModel(r.provCfg))
 	app.SetProviders(allProviders)
-	app.AddApprovalGuard(perm)
-	app.SetCheckpointManager(cpMgr)
+	app.AddApprovalGuard(r.perm)
+	app.SetCheckpointManager(r.cpMgr)
+	app.SetTrust(r.trust)
+
+	// TUI 模式下使用 App 的 TUI 提示替代 stdin 提示。
+	setToolTrust(r.tools, app)
 
 	hm := tool.NewHookManager()
 	registerAutoFormatHook(hm)
@@ -466,7 +542,6 @@ func chatCommand() {
 	if sessionMgr != nil {
 		app.SetSessionManager(sessionMgr)
 
-		// 如果指定了 --session，恢复该会话
 		if *flagSession != "" {
 			if sess, ok := sessionMgr.Get(*flagSession); ok {
 				if err := sessionMgr.SetActive(*flagSession); err != nil {
@@ -484,9 +559,8 @@ func chatCommand() {
 		}
 	}
 
-	// 不启用 WithMouseCellMotion：它会接管终端的文本选择，导致无法用鼠标复制内容。
-	// 滚动改用键盘 PageUp/PageDown（已内置支持）。
-	program := tea.NewProgram(app, tea.WithAltScreen(), tea.WithInputTTY())
+	// 启用 WithMouseCellMotion：支持鼠标滚轮滚动 viewport，同时保留 Shift+拖动选中文本。
+	program := tea.NewProgram(app, tea.WithAltScreen(), tea.WithInputTTY(), tea.WithMouseCellMotion())
 	app.SetProgram(program)
 
 	// 1.13 修复：捕获 SIGTERM/SIGHUP，终端关闭或 kill 时通知 TUI 保存退出，
@@ -501,6 +575,11 @@ func chatCommand() {
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 运行错误: %v\n", err)
 		os.Exit(1)
+	}
+
+	// 退出时打印 session ID，方便用户下次 --session 恢复
+	if sid := app.SessionID(); sid != "" {
+		fmt.Fprintf(os.Stderr, "\n🔁 使用 --session %s 可恢复当前会话\n", sid)
 	}
 }
 
@@ -565,13 +644,12 @@ func loadEnvFiles() {
 
 // ExportEnvToSubprocess 将当前环境变量导出到子进程
 // 工具执行（bash 等）时自动继承
-func ExportEnvToSubprocess() []string {
-	apiKeys := map[string]bool{
-		"DEEPSEEK_API_KEY":  true,
-		"MIMO_API_KEY":      true,
-		"OPENAI_API_KEY":    true,
-		"ANTHROPIC_API_KEY": true,
-		"TAVILY_API_KEY":    true,
+func ExportEnvToSubprocess(cfg *config.Config) []string {
+	apiKeys := make(map[string]bool)
+	for _, p := range cfg.Providers {
+		if p.APIKeyEnv != "" {
+			apiKeys[p.APIKeyEnv] = true
+		}
 	}
 
 	shellKeys := []string{
@@ -598,7 +676,6 @@ func ExportEnvToSubprocess() []string {
 
 		for _, sk := range shellKeys {
 			if key == sk {
-				// 跳过空值以避免子进程被设空 PATH 等关键变量后找不到命令。
 				val := e[idx+1:]
 				if val == "" {
 					continue
@@ -613,10 +690,12 @@ func ExportEnvToSubprocess() []string {
 }
 
 // envProvider 实现 tool.EnvProvider 接口
-type envProvider struct{}
+type envProvider struct {
+	cfg *config.Config
+}
 
 func (p *envProvider) EnvForSubprocess() []string {
-	return ExportEnvToSubprocess()
+	return ExportEnvToSubprocess(p.cfg)
 }
 
 // dashboardCommand 启动 Web Dashboard
@@ -629,7 +708,11 @@ func dashboardCommand(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := dashboard.NewServer(addr)
+	server, err := dashboard.NewServer(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Dashboard 初始化失败: %v\n", err)
+		os.Exit(1)
+	}
 	if err := server.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Dashboard 启动失败: %v\n", err)
 		os.Exit(1)

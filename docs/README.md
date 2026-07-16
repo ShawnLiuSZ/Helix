@@ -48,6 +48,16 @@
 - [功能完整性审查](feature-completeness-review.md) - 结合 MiMo/DeepSeek 官方文档的功能对比
 - [开发路线图](development-roadmap.md) - v0.1.1 → v0.3.0 功能演进计划
 
+### 🤖 知识库
+
+面向智能体快速参考的项目知识库（Obsidian 规范，含双向链接）。
+
+- [智能体索引 (AGENTS.md)](knowledge/AGENTS.md) - 🤖 智能体优先阅读
+- [知识库首页](knowledge/00-Index.md) - 全部文档导航
+- [架构总览](knowledge/architecture/架构总览.md) - 分层架构与模块依赖
+- [核心模块文档](knowledge/MOC/MOC-核心模块.md) - 11 个核心模块详解
+- [接口协议文档](knowledge/MOC/MOC-接口协议.md) - Provider/Tool/MCP 接口
+
 ---
 
 ## 快速链接

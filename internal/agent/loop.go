@@ -27,10 +27,11 @@ type Agent struct {
 	skillsMgr   *skills.Manager     // Skills 管理器
 	memory      MemoryProvider      // 记忆提供者（项目知识/用户偏好）
 	history     []provider.Message  // 跨轮次对话历史（不含 system，每轮重建）
-	onCost      func(float64)       // 成本回调
-	effort      *EffortManager      // 思考强度管理器
-	eventLog    *EventLog           // 事件日志（缓存命中统计等）
-	fingerprint *FingerprintTracker // prefix 指纹追踪器（验证 prefix cache 是否命中预期）
+	onCost      func(float64)                       // 成本回调
+	onProgress  func(step int, phase, tool string) // 进度回调（phase: thinking/tool）
+	effort      *EffortManager                     // 思考强度管理器
+	eventLog    *EventLog                          // 事件日志（缓存命中统计等）
+	fingerprint *FingerprintTracker                // prefix 指纹追踪器（验证 prefix cache 是否命中预期）
 
 	costBudget           float64
 	onBudgetExceeded     func()
@@ -183,6 +184,17 @@ func (a *Agent) initMessages(task string) {
 // SetCostCallback 设置成本回调（每次 API 调用后触发）
 func (a *Agent) SetCostCallback(fn func(float64)) { a.onCost = fn }
 
+// SetProgressCallback 设置进度回调（step 从 1 开始；phase 为 "thinking" 或 "tool"）。
+// UI 据此实时显示当前执行步骤与工具名。
+func (a *Agent) SetProgressCallback(fn func(step int, phase, tool string)) { a.onProgress = fn }
+
+// progress 安全触发进度回调。
+func (a *Agent) progress(step int, phase, tool string) {
+	if a.onProgress != nil {
+		a.onProgress(step, phase, tool)
+	}
+}
+
 // SetCostBudget 设置成本预算上限
 func (a *Agent) SetCostBudget(b float64) { a.costBudget = b }
 
@@ -214,8 +226,25 @@ func (a *Agent) getContextWindow() int {
 	return 0 // 未知模型，不截断
 }
 
-// estimateTokens 粗略估算消息列表的 token 数（1 token ≈ 4 bytes for English, ~2 for CJK）
-func estimateTokens(messages []provider.Message) int {
+// estimateTokens 估算消息列表的 token 数。
+// 如果 provider 实现了 provider.TokenCounter，则使用离线 tokenizer；否则回退到粗略估算。
+func (a *Agent) estimateTokens(messages []provider.Message) int {
+	if tc, ok := a.provider.(provider.TokenCounter); ok {
+		total := 0
+		for _, msg := range messages {
+			n, err := tc.CountTokens(msg.Content)
+			if err == nil {
+				total += n
+			} else {
+				total += len(msg.Content) / 3
+			}
+			if len(msg.ToolCalls) > 0 {
+				total += 50 * len(msg.ToolCalls) // 工具调用开销
+			}
+		}
+		return total
+	}
+
 	total := 0
 	for _, msg := range messages {
 		total += len(msg.Content) / 3 // 粗略估算
@@ -236,7 +265,7 @@ func (a *Agent) truncateMessages(ctxWindow int) {
 
 	maxInput := ctxWindow * 80 / 100
 
-	tokens := estimateTokens(a.messages)
+	tokens := a.estimateTokens(a.messages)
 	if tokens <= maxInput {
 		return
 	}
@@ -276,29 +305,45 @@ func (a *Agent) truncateMessages(ctxWindow int) {
 
 		// 防止留下 orphan tool 消息：删除范围之后的连续 tool 结果也要一并带走，
 		// 否则 assistant tool_call 被删但 tool 结果留下，触发 LLM API 400。
-		for roundEnd+1 < len(a.messages)-keepRecent && a.messages[roundEnd+1].Role == "tool" {
+		// 注意：扫描不限制 keepRecent 边界——若 tool 结果落在保留区，它的 assistant
+		// 被删后同样成 orphan，必须一起删除（保留区缩小优于 API 400）。
+		for roundEnd+1 < len(a.messages) && a.messages[roundEnd+1].Role == "tool" {
 			roundEnd++
 		}
 
 		// 删除整个轮次 [roundStart, roundEnd]
 		deleted := a.messages[roundStart : roundEnd+1]
-		tokens -= estimateTokens(deleted)
+		tokens -= a.estimateTokens(deleted)
 		a.messages = append(a.messages[:roundStart], a.messages[roundEnd+1:]...)
 	}
 }
 
-// RunStream 流式运行 Agent，通过 channel 返回文本增量
-func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-chan error) {
-	textCh := make(chan string, 100)
+// StreamChunk 表示流式输出中的一个文本片段。
+type StreamChunk struct {
+	Content     string
+	IsReasoning bool
+}
+
+// RunStream 流式运行 Agent，通过 channel 返回文本增量。
+// StreamChunk.IsReasoning 为 true 时表示该片段为模型的思考过程（reasoning_content）。
+func (a *Agent) RunStream(ctx context.Context, task string) (<-chan StreamChunk, <-chan error) {
+	textCh := make(chan StreamChunk, 100)
 	errCh := make(chan error, 1)
 
 	go func() {
 		defer close(textCh)
 		defer close(errCh)
 		// H19 修复：防止流式 goroutine 因 panic 泄漏通道/goroutine，确保 defer close 一定执行。
+		// D7 修复：Go defer 按 LIFO 执行，panic 恢复先于 close(errCh)。
+		// 若 errCh（容量 1）已有缓冲值，阻塞发送 errCh<-... 会导致 close 永不执行，
+		// close(textCh) 与消费方 range 永久挂起——死锁。
+		// 改为非阻塞发送：errCh 满时丢弃 panic 错误，优先保证通道关闭。
 		defer func() {
 			if r := recover(); r != nil {
-				errCh <- fmt.Errorf("stream panic: %v", r)
+				select {
+				case errCh <- fmt.Errorf("stream panic: %v", r):
+				default:
+				}
 			}
 		}()
 
@@ -315,6 +360,9 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 				return
 			default:
 			}
+
+			// 向 UI 报告当前步骤：模型思考中。
+			a.progress(step+1, "thinking", "")
 
 			// 压缩以适应上下文窗口（缓存友好，失败时回退机械截断）
 			a.compactMessages(ctx, a.getContextWindow())
@@ -349,16 +397,20 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 			for event := range streamCh {
 				switch event.Type {
 				case provider.EventText:
+					// 流式转发推理过程，让 UI 可以选择性展示（如灰色折叠）。
 					if event.ReasoningContent != "" {
 						reasoningContent += event.ReasoningContent
-					} else {
-						fullContent += event.Content
+						select {
+						case textCh <- StreamChunk{Content: event.ReasoningContent, IsReasoning: true}:
+						case <-ctx.Done():
+							return
+						}
 					}
-					// 只显示实际内容给用户，不显示推理过程
 					if event.Content != "" {
+						fullContent += event.Content
 						// H19 修复：消费者退出时 ctx 取消，带保护的发送避免永久阻塞。
 						select {
-						case textCh <- event.Content:
+						case textCh <- StreamChunk{Content: event.Content, IsReasoning: false}:
 						case <-ctx.Done():
 							return
 						}
@@ -439,6 +491,11 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 				return
 			}
 
+			// 向 UI 报告即将执行的工具（取第一个工具名用于展示）。
+			if len(toolCalls) > 0 {
+				a.progress(step+1, "tool", toolCalls[0].Function.Name)
+			}
+
 			// 执行工具
 			toolResults := a.executeTools(ctx, toolCalls)
 			for i, tc := range toolCalls {
@@ -464,7 +521,10 @@ func (a *Agent) RunStream(ctx context.Context, task string) (<-chan string, <-ch
 		}
 
 		// 达到步数上限：发提示后正常结束，保留已生成内容（而非发 error 让 UI 丢弃内容）
-		textCh <- fmt.Sprintf("\n\n[已达到最大步数限制 (%d)。可使用 /goal 设置停止条件，或 /steps 增大步数限制后继续。]", a.maxSteps)
+		select {
+		case textCh <- StreamChunk{Content: fmt.Sprintf("\n\n[已达到最大步数限制 (%d)。可使用 /goal 设置停止条件，或 /steps 增大步数限制后继续。]", a.maxSteps)}:
+		case <-ctx.Done():
+		}
 	}()
 
 	return textCh, errCh
@@ -539,11 +599,18 @@ func (a *Agent) Run(ctx context.Context, task string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("chat error (step %d): %w", step, err)
 		}
+		if resp == nil {
+			return "", fmt.Errorf("provider returned nil response at step %d", step)
+		}
 
 		// 记录 prefix cache 命中统计（独立于成本回调，无 onCost 时也生效）
 		if a.eventLog != nil {
-			a.eventLog.RecordInputTokens(int64(resp.Usage.PromptTokens))
-			a.eventLog.RecordOutputTokens(int64(resp.Usage.CompletionTokens))
+			if resp.Usage.PromptTokens > 0 {
+				a.eventLog.RecordInputTokens(int64(resp.Usage.PromptTokens))
+			}
+			if resp.Usage.CompletionTokens > 0 {
+				a.eventLog.RecordOutputTokens(int64(resp.Usage.CompletionTokens))
+			}
 			if resp.Usage.CachedInputTokens > 0 {
 				a.eventLog.LogCacheHit(int64(resp.Usage.CachedInputTokens))
 				if a.cacheScheduler != nil {

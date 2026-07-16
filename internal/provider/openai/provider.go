@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/ShawnLiuSZ/loomcode/internal/consts"
 	"github.com/ShawnLiuSZ/loomcode/internal/provider"
@@ -227,9 +228,13 @@ func parseChatResponse(data []byte) (*provider.ChatResponse, error) {
 				args = nil
 			}
 			resp.ToolCalls = append(resp.ToolCalls, provider.ToolCall{
-				ID:       tc.ID,
-				Function: provider.ToolCallFunc{Name: tc.Function.Name},
-				Args:     args,
+				ID:   tc.ID,
+				Type: "function",
+				Function: provider.ToolCallFunc{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+				Args: args,
 			})
 		}
 	}
@@ -252,5 +257,10 @@ func truncateSensitive(s string) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "...(truncated)"
+	// 回退到最后一个 UTF-8 rune 边界，避免切断多字节字符产生乱码
+	end := maxLen
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "...(truncated)"
 }

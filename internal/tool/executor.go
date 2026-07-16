@@ -129,6 +129,11 @@ func (e *Executor) Execute(ctx context.Context, calls []Call) []*Result {
 			wg.Add(1)
 			go func(idx int, c Call) {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						results[idx] = &Result{Error: fmt.Sprintf("tool %q panicked: %v", c.Name, r)}
+					}
+				}()
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				results[idx] = e.executeOne(ctx, c)
@@ -191,6 +196,9 @@ func (e *Executor) executeOne(ctx context.Context, call Call) *Result {
 	if err != nil {
 		return &Result{Error: err.Error()}
 	}
+	if result == nil {
+		return &Result{Error: fmt.Sprintf("tool %q returned nil result", call.Name)}
+	}
 
 	// Post-hooks
 	if hooks != nil {
@@ -223,14 +231,18 @@ func pruneResult(content string, maxLines int) string {
 		maxLines = maxToolResultLines
 	}
 	lines := strings.Split(content, "\n")
-	keep := headKeepLines + tailKeepLines
-	// 防御性 clamp：maxLines 过小时直接返回全文，避免头尾重叠、占位符负数导致输出膨胀。
-	if len(lines) <= maxLines || maxLines < keep {
+	if len(lines) <= maxLines {
 		return content
 	}
-	head := lines[:headKeepLines]
-	tail := lines[len(lines)-tailKeepLines:]
-	omitted := len(lines) - keep
+	// 动态计算头尾保留行数：各占一半，不超过预设常量，避免重叠。
+	headKeep := min(maxLines/2, headKeepLines)
+	tailKeep := min(maxLines-headKeep, tailKeepLines)
+	if headKeep+tailKeep >= len(lines) {
+		return content
+	}
+	head := lines[:headKeep]
+	tail := lines[len(lines)-tailKeep:]
+	omitted := len(lines) - headKeep - tailKeep
 	return strings.Join(head, "\n") +
 		fmt.Sprintf("\n... (pruned %d lines, %d total) ...\n", omitted, len(lines)) +
 		strings.Join(tail, "\n")

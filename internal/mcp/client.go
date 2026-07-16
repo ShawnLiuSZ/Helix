@@ -142,7 +142,7 @@ func (c *Client) connect() error {
 		},
 	}
 
-	resp, err := c.callRaw(MethodInitialize, initParams)
+	resp, err := c.callRaw(context.Background(), MethodInitialize, initParams)
 	if err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
@@ -284,20 +284,20 @@ func (c *Client) readLoop() {
 }
 
 // call 发送请求并等待响应（带超时和自动重连）
-func (c *Client) call(method string, params any) (*Response, error) {
-	resp, err := c.callRaw(method, params)
+func (c *Client) call(ctx context.Context, method string, params any) (*Response, error) {
+	resp, err := c.callRaw(ctx, method, params)
 	if err != nil && isDisconnectedErr(err) && c.maxRetries > 0 {
 		if rerr := c.reconnect(); rerr != nil {
 			return nil, fmt.Errorf("server disconnected and reconnect failed: %w", rerr)
 		}
 		// 重连成功，重试原始请求
-		return c.callRaw(method, params)
+		return c.callRaw(ctx, method, params)
 	}
 	return resp, err
 }
 
 // callRaw 发送请求并等待响应（不重连）
-func (c *Client) callRaw(method string, params any) (*Response, error) {
+func (c *Client) callRaw(ctx context.Context, method string, params any) (*Response, error) {
 	id := c.nextID.Add(1)
 	req, err := NewRequest(id, method, params)
 	if err != nil {
@@ -326,7 +326,7 @@ func (c *Client) callRaw(method string, params any) (*Response, error) {
 	}
 	c.mu.Unlock()
 
-	// 等待响应
+	// 等待响应（N4：支持外部 ctx 取消，用户 Ctrl+C 时不再等满 30s）
 	select {
 	case resp := <-respCh:
 		if resp.Error != nil {
@@ -339,6 +339,9 @@ func (c *Client) callRaw(method string, params any) (*Response, error) {
 	case <-c.done:
 		c.cancelPending(id)
 		return nil, fmt.Errorf("%w", errServerDisconnected)
+	case <-ctx.Done():
+		c.cancelPending(id)
+		return nil, ctx.Err()
 	}
 }
 
@@ -388,8 +391,8 @@ func (c *Client) ServerInfo() ServerInfo {
 }
 
 // ListTools 列出可用工具
-func (c *Client) ListTools() ([]Tool, error) {
-	resp, err := c.call(MethodListTools, nil)
+func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
+	resp, err := c.call(ctx, MethodListTools, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -404,13 +407,13 @@ func (c *Client) ListTools() ([]Tool, error) {
 }
 
 // CallTool 调用工具
-func (c *Client) CallTool(name string, args map[string]any) (*CallToolResult, error) {
+func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (*CallToolResult, error) {
 	params := CallToolParams{
 		Name:      name,
 		Arguments: args,
 	}
 
-	resp, err := c.call(MethodCallTool, params)
+	resp, err := c.call(ctx, MethodCallTool, params)
 	if err != nil {
 		return nil, err
 	}

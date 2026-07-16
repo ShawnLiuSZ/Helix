@@ -46,7 +46,7 @@ var providerPresets = map[int]providerPreset{
 	},
 	2: {
 		Kind: "mimo", Name: "mimo", DisplayName: "MiMo",
-		BaseURL: "https://api.mimo.xiaomi.com/v1", APIKeyEnv: "MIMO_API_KEY",
+		BaseURL: "https://api.xiaomimimo.com/v1", APIKeyEnv: "MIMO_API_KEY",
 		Models: []ModelConfig{
 			{ID: "mimo-v2.5-pro", Name: "MiMo V2.5 Pro", ContextWindow: 262144,
 				Capabilities: CapConfig{Reasoning: true, ToolCall: true, Voice: true}},
@@ -87,6 +87,14 @@ func (w *Wizard) Run() (*Config, map[string]string, error) {
 		}
 	} else {
 		preset = providerPresets[choice]
+	}
+
+	// Step 1.5: MiMo 接入方式选择
+	if preset.Kind == "mimo" {
+		preset, err = w.selectMiMoMode(preset)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Step 2: Enter API key
@@ -160,6 +168,26 @@ func (w *Wizard) collectCustomProvider() (providerPreset, error) {
 		Kind: "openai", Name: name, DisplayName: name,
 		BaseURL: baseURL, APIKeyEnv: apiKeyEnv,
 	}, nil
+}
+
+// selectMiMoMode prompts the user to choose MiMo connection mode.
+func (w *Wizard) selectMiMoMode(preset providerPreset) (providerPreset, error) {
+	fmt.Println()
+	fmt.Println("选择 MiMo 接入方式:")
+	fmt.Println("  1. 按量付费 API (base_url: https://api.xiaomimimo.com/v1)")
+	fmt.Println("  2. Token Plan (base_url: https://token-plan-cn.xiaomimimo.com/v1)")
+	choice, err := w.readChoice("请输入选项 (1-2): ", 2)
+	if err != nil {
+		return providerPreset{}, err
+	}
+
+	if choice == 2 {
+		preset.Name = "mimo-token-plan"
+		preset.DisplayName = "MiMo Token Plan"
+		preset.BaseURL = "https://token-plan-cn.xiaomimimo.com/v1"
+		preset.APIKeyEnv = "MIMO_TOKEN_PLAN_KEY"
+	}
+	return preset, nil
 }
 
 // selectModel prompts the user to pick a model from the preset or enter a custom one.

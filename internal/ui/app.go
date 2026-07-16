@@ -86,6 +86,11 @@ type App struct {
 	allProviders      []provider.Provider
 	allProviderModels map[string][]provider.ModelInfo
 
+	// /resume 会话列表选择状态
+	showResumePicker bool
+	resumeSessions   []*session.Session
+	resumeIdx        int
+
 	// 成本
 	costTotal   atomic.Uint64
 	costSession atomic.Uint64
@@ -103,19 +108,25 @@ type App struct {
 	eventLog *agent.EventLog
 
 	// Agent 活动状态
-	lastStep int
-	lastTool string
+	lastStep      int
+	lastTool      string
+	activityPhase string // "thinking" | "tool"
 
 	// 流式输出缓冲
-	streamMu    sync.Mutex
-	streamBuf   string
-	streamChars int // 当前步流式已接收字符数，用于实时估算生成 token
+	streamMu           sync.Mutex
+	streamBuf          string // 普通内容缓冲
+	streamReasoningBuf string // 思考过程缓冲
+	streamChars        int    // 当前步流式已接收字符数，用于实时估算生成 token
 
 	// BubbleTea program reference
 	program *tea.Program
 
 	// Approval
 	pendingApproval *pendingWrite
+
+	// 工作区外文件访问授权
+	trust          *control.WorkspaceTrust
+	pendingOutside *pendingOutsideAccess
 
 	// 请求取消
 	cancelFunc context.CancelFunc
@@ -141,10 +152,11 @@ type App struct {
 }
 
 type chatMessage struct {
-	Role      string
-	Content   string
-	ToolName  string
-	Timestamp time.Time
+	Role              string
+	Content           string
+	ReasoningContent  string // 模型的思考过程（流式片段聚合）
+	ToolName          string
+	Timestamp         time.Time
 }
 
 // modelPickerEntry 模型选择器条目（包含 provider 信息）
@@ -161,7 +173,32 @@ type pendingWrite struct {
 	decision   chan bool
 }
 
+type pendingOutsideAccess struct {
+	path string
+	done chan outsideAccessDecision
+}
+
+type outsideAccessDecision struct {
+	granted   bool
+	permanent bool
+}
+
 type approvalMsg struct{}
+
+type outsideAccessMsg struct{}
+
+// costBudgetExceededMsg 预算超支消息，由 Agent goroutine 通过 program.Send 路由到主 goroutine。
+type costBudgetExceededMsg struct {
+	sessionCost float64
+	budget      float64
+}
+
+// activityMsg Agent 执行进度消息（由 Agent 回调发送）。
+type activityMsg struct {
+	step  int
+	phase string
+	tool  string
+}
 
 // confirmQuitResetMsg 3 秒后重置 Ctrl+C 二次确认状态
 type confirmQuitResetMsg struct{}
@@ -169,31 +206,58 @@ type confirmQuitResetMsg struct{}
 // 所有可用命令
 var allCommands = []string{
 	"/help", "/mode", "/build", "/plan", "/compose", "/max",
-	"/goal", "/clear", "/cost", "/budget", "/env", "/model", "/skills", "/sessions", "/compact", "/queue", "/steps", "/remember", "/quit",
+	"/goal", "/clear", "/cost", "/budget", "/env", "/model", "/skills", "/sessions", "/resume", "/compact", "/queue", "/steps", "/remember", "/quit",
 }
 
-// 样式
-var (
-	userStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	assistantStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	systemStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
-	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	suggestionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	suggestionSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4"))
-	headerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Padding(0, 1)
-	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("7")).Padding(0, 1)
-	costGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	costYellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	costRedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	activityStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Italic(true)
-	contextWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+// RoleColor 角色→ANSI 颜色索引常量表，统一管理语义色，避免魔法数字扩散。
+const (
+	colorUser       = "6"  // cyan
+	colorAssistant  = "3"  // yellow
+	colorSystem     = "8"  // bright black
+	colorTool       = "5"  // magenta
+	colorDanger     = "1"  // red — error/cost-red/diff-del/context-warn 共用
+	colorSuccess    = "2"  // green
+	colorInfo       = "4"  // blue
+	colorHighlight  = "6"  // cyan (diff header)
+	colorSuggestion = "8"  // bright black
+	colorMuted      = "7"  // white
+	colorBg         = "7"  // cursor background
+	colorFg         = "0"  // black (cursor text)
+	colorLogo       = "#3B82F6" // Blue-500 (version text)
+	colorLogoAccent = "#7C3AED" // Violet-600 (welcome logo)
+)
 
-	approvalTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	diffAddStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	diffDelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	diffHeaderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	approvalHelpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true)
+// 样式注册表（集中管理所有命名样式）
+var (
+	userStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color(colorUser)).Bold(true)
+	assistantStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAssistant))
+	systemStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSystem)).Italic(true)
+	toolStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color(colorTool))
+	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(colorDanger)).Bold(true)
+	suggestionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSuggestion))
+	suggestionSel    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorFg)).Background(lipgloss.Color(colorInfo))
+	headerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSuccess)).Bold(true).Padding(0, 1)
+	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorFg)).Background(lipgloss.Color(colorMuted)).Padding(0, 1)
+	costGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSuccess))
+	costYellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAssistant))
+	costRedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(colorDanger))
+	activityStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorInfo)).Italic(true)
+	contextWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorDanger)).Bold(true)
+
+	approvalTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAssistant)).Bold(true)
+	diffAddStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSuccess))
+	diffDelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(colorDanger))
+	diffHeaderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorHighlight)).Bold(true)
+	approvalHelpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAssistant)).Italic(true)
+
+	// renderWelcome 专用（原散落在函数内，现收入注册表）
+	logoStyle = lipgloss.NewStyle().Bold(true)
+	verStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorLogo)).Bold(true)
+	tipStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted))
+
+	// textarea 光标样式（原散落在 NewApp 内，现收入注册表）
+	cursorBgStyle = lipgloss.NewStyle().Background(lipgloss.Color(colorBg))
+	cursorFgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorFg))
 )
 
 // NewApp 创建 TUI 应用
@@ -227,9 +291,9 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.FocusedStyle.Base = lipgloss.NewStyle()
 	ta.BlurredStyle.Base = lipgloss.NewStyle()
-	// 修复光标渲染乱码：用 Background 替代 Reverse(true)
-	ta.Cursor.Style = lipgloss.NewStyle().Background(lipgloss.Color("7"))
-	ta.Cursor.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0"))
+	// 修复光标渲染乱码：用 Background 替代 Reverse(true) — 使用注册表样式
+	ta.Cursor.Style = cursorBgStyle
+	ta.Cursor.TextStyle = cursorFgStyle
 
 	// 创建 glamour renderer（1.3：背景色在 Init 中检测，此处先默认深色，WindowSizeMsg 时按实际更新）
 	renderer, _ := glamour.NewTermRenderer(
@@ -256,6 +320,13 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 	// 接通 EventLog，用于状态栏显示 prefix cache 命中率
 	app.eventLog = ag.EventLog()
 
+	// 注册 Agent 进度回调：将当前步骤/工具名通过 Bubble Tea 消息投递到 UI 主循环。
+	ag.SetProgressCallback(func(step int, phase, tool string) {
+		if app.program != nil {
+			app.program.Send(activityMsg{step: step, phase: phase, tool: tool})
+		}
+	})
+
 	ag.SetCostCallback(func(cost float64) {
 		app.costLast.Store(costUint64FromFloat(cost))
 		for {
@@ -275,10 +346,10 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 		sessionCost := costFloatFromUint64(app.costSession.Load())
 		if app.costBudget > 0 && sessionCost >= app.costBudget && app.cancelFunc != nil {
 			app.cancelFunc()
-			app.messages = append(app.messages, chatMessage{
-				Role:    "system",
-				Content: fmt.Sprintf("预算已用尽 ($%.4f/$%.4f)。使用 /budget <amount> 调整预算。", sessionCost, app.costBudget),
-			})
+			// 在 Agent goroutine 中不能直接写 a.messages，通过 program.Send 路由到 BubbleTea 主 goroutine。
+			if app.program != nil {
+				app.program.Send(costBudgetExceededMsg{sessionCost: sessionCost, budget: app.costBudget})
+			}
 		}
 	})
 
@@ -291,12 +362,52 @@ func (a *App) SetWorkDir(d string)                    { a.agent.SetWorkDir(d) }
 func (a *App) SetProgram(p *tea.Program)              { a.program = p }
 func (a *App) SetHooks(hm *tool.HookManager)          { a.agent.SetHooks(hm) }
 
+// SessionID 返回当前活跃会话的 ID，用于退出时提示用户。
+// 无活跃会话时返回空字符串。
+func (a *App) SessionID() string {
+	if a.activeSess != nil {
+		return a.activeSess.ID
+	}
+	return ""
+}
+
 // SetCheckpointManager 注入编辑快照管理器，启用 /rewind 回退安全网。
 func (a *App) SetCheckpointManager(mgr *tool.CheckpointManager) { a.checkpointMgr = mgr }
 
 // SetEventLog 注入 agent EventLog,用于在状态栏显示 prefix cache 命中率。
 // 传入 nil 则不显示 cache 字段。
 func (a *App) SetEventLog(l *agent.EventLog) { a.eventLog = l }
+
+// SetTrust 注入工作区信任管理器，用于 TUI 模式下提示工作区外文件访问授权。
+func (a *App) SetTrust(trust *control.WorkspaceTrust) { a.trust = trust }
+
+// IsOutsideAccessAllowed 报告 path 是否已被允许访问（委托给 WorkspaceTrust）。
+func (a *App) IsOutsideAccessAllowed(path string) bool {
+	if a.trust == nil {
+		return false
+	}
+	return a.trust.IsOutsideAccessAllowed(path)
+}
+
+// PromptAndAllow 在 TUI 中提示用户是否允许访问工作区外 path。
+// 工具执行 goroutine 会阻塞在此方法，直到用户做出选择。
+func (a *App) PromptAndAllow(path string) error {
+	if a.program == nil || a.trust == nil {
+		return fmt.Errorf("TUI not ready or trust not configured")
+	}
+	done := make(chan outsideAccessDecision, 1)
+	a.pendingOutside = &pendingOutsideAccess{
+		path: path,
+		done: done,
+	}
+	a.program.Send(outsideAccessMsg{})
+	decision := <-done
+	a.pendingOutside = nil
+	if !decision.granted {
+		return nil
+	}
+	return a.trust.AllowOutsideAccess(path, decision.permanent)
+}
 
 func (a *App) AddApprovalGuard(perm *control.Permission) {
 	a.agent.AddGuard(func(tc tool.Call) error {
@@ -388,12 +499,32 @@ func (a *App) saveSession() {
 		if !hasUserMsg {
 			return
 		}
-		a.activeSess = a.sessionMgr.Create("default", a.model, a.provider.Name())
+		// 使用第一条用户消息作为会话名称（最多 40 个字符）
+		name := "default"
+		for _, m := range a.messages {
+			if m.Role == "user" {
+				name = truncateString(m.Content, 40)
+				break
+			}
+		}
+		a.activeSess = a.sessionMgr.Create(name, a.model, a.provider.Name())
 		if a.activeSess == nil {
 			// 会话创建失败（元信息持久化失败），中止本次保存以免后续追加到无效文件。
 			return
 		}
 	}
+	// 若会话名仍为默认占位，使用第一条用户消息自动重命名（启动/resume 后的首个任务）。
+	if a.activeSess.Name == "default" {
+		for _, m := range a.messages {
+			if m.Role == "user" {
+				if err := a.sessionMgr.UpdateName(a.activeSess.ID, truncateString(m.Content, 40)); err != nil {
+					log.Printf("rename session: %v", err)
+				}
+				break
+			}
+		}
+	}
+
 	// 只保存新消息（上次保存之后的）
 	for i := a.savedMsgCount; i < len(a.messages); i++ {
 		msg := a.messages[i]
@@ -446,6 +577,8 @@ func (a *App) RestoreSession(sess *session.Session) {
 	a.messages = append(a.messages, chatMessage{
 		Role: "system", Content: "会话已恢复，继续对话或输入 /help 查看命令", Timestamp: time.Now(),
 	})
+	// 已恢复的消息不需要再次追加到会话文件；新消息从当前列表末尾开始保存。
+	a.savedMsgCount = len(a.messages)
 }
 
 func (a *App) Init() tea.Cmd {
@@ -488,11 +621,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 更新 viewport
 		if a.viewport.Width == 0 {
 			a.viewport = viewport.New(msg.Width, a.height-8)
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.MouseWheelEnabled = true
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 		} else {
 			a.viewport.Width = msg.Width
 			a.viewport.Height = a.height - 8
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.MouseWheelEnabled = true
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 			a.viewport.GotoBottom()
 		}
 
@@ -505,46 +640,90 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 
+	case tea.MouseMsg:
+		// 鼠标滚轮控制 viewport 滚动
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			a.viewport.ScrollUp(3)
+		case tea.MouseButtonWheelDown:
+			a.viewport.ScrollDown(3)
+		}
+		return a, nil
+
 	case streamChunkMsg:
 		a.streamMu.Lock()
-		a.streamBuf += string(msg)
-		a.streamChars += len(msg)
+		if msg.IsReasoning {
+			a.streamReasoningBuf += msg.Content
+		} else {
+			a.streamBuf += msg.Content
+		}
+		a.streamChars += len(msg.Content)
 		buf := a.streamBuf
+		reasoningBuf := a.streamReasoningBuf
 		a.streamMu.Unlock()
-		a.viewport.SetContent(a.renderMessages(a.height-8, buf))
+		a.viewport.SetContent(a.renderMessages(a.height-8, buf, reasoningBuf))
 		a.viewport.GotoBottom()
 		return a, nil
 
 	case streamDoneMsg:
 		a.streamMu.Lock()
 		content := a.streamBuf
+		reasoning := a.streamReasoningBuf
 		a.streamBuf = ""
+		a.streamReasoningBuf = ""
 		a.streamChars = 0
 		a.streamMu.Unlock()
 		a.loading = false
 		a.cancelFunc = nil
-		a.messages = append(a.messages, chatMessage{Role: "assistant", Content: content, Timestamp: time.Now()})
+		a.lastStep = 0
+		a.lastTool = ""
+		a.activityPhase = ""
+		a.messages = append(a.messages, chatMessage{Role: "assistant", Content: content, ReasoningContent: reasoning, Timestamp: time.Now()})
 		a.saveSession()
-		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 		a.viewport.GotoBottom()
 		return a, a.processQueue()
 
 	case streamErrorMsg:
 		a.streamMu.Lock()
 		a.streamBuf = ""
+		a.streamReasoningBuf = ""
 		a.streamMu.Unlock()
 		a.loading = false
 		a.cancelFunc = nil
+		a.lastStep = 0
+		a.lastTool = ""
+		a.activityPhase = ""
 		errStr := friendlyError(string(msg))
 		a.messages = append(a.messages, chatMessage{Role: "error", Content: errStr, Timestamp: time.Now()})
 		a.saveSession()
-		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 		a.viewport.GotoBottom()
 		return a, a.processQueue()
 
 	case approvalMsg:
-		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 		a.viewport.GotoBottom()
+		return a, nil
+
+	case outsideAccessMsg:
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+		a.viewport.GotoBottom()
+		return a, nil
+
+	case costBudgetExceededMsg:
+		a.messages = append(a.messages, chatMessage{
+			Role:    "system",
+			Content: fmt.Sprintf("预算已用尽 ($%.4f/$%.4f)。使用 /budget <amount> 调整预算。", msg.sessionCost, msg.budget),
+		})
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+		a.viewport.GotoBottom()
+		return a, nil
+
+	case activityMsg:
+		a.lastStep = msg.step
+		a.activityPhase = msg.phase
+		a.lastTool = msg.tool
 		return a, nil
 
 	case confirmQuitResetMsg:
@@ -575,7 +754,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			pw := a.pendingApproval
 			a.pendingApproval = nil
 			pw.decision <- true
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 			a.viewport.GotoBottom()
 			return a, nil
 		case "esc":
@@ -583,7 +762,36 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.pendingApproval = nil
 			pw.decision <- false
 			a.messages = append(a.messages, chatMessage{Role: "system", Content: "操作已拒绝"})
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		default:
+			return a, nil
+		}
+	}
+
+	if a.pendingOutside != nil {
+		switch key {
+		case "t":
+			po := a.pendingOutside
+			a.pendingOutside = nil
+			po.done <- outsideAccessDecision{granted: true, permanent: false}
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		case "p":
+			po := a.pendingOutside
+			a.pendingOutside = nil
+			po.done <- outsideAccessDecision{granted: true, permanent: true}
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		case "n", "esc":
+			po := a.pendingOutside
+			a.pendingOutside = nil
+			po.done <- outsideAccessDecision{granted: false, permanent: false}
+			a.messages = append(a.messages, chatMessage{Role: "system", Content: "已拒绝访问工作区外文件"})
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 			a.viewport.GotoBottom()
 			return a, nil
 		default:
@@ -596,13 +804,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "down":
 			a.modelIdx = (a.modelIdx + 1) % len(a.modelList)
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
-			a.viewport.GotoBottom()
+			a.viewport.SetContent(a.renderMessages(a.viewport.Height, "", ""))
 			return a, nil
 		case "up":
 			a.modelIdx = (a.modelIdx - 1 + len(a.modelList)) % len(a.modelList)
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
-			a.viewport.GotoBottom()
+			a.viewport.SetContent(a.renderMessages(a.viewport.Height, "", ""))
 			return a, nil
 		case "enter":
 			if a.modelIdx >= 0 && a.modelIdx < len(a.modelList) {
@@ -623,14 +829,45 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.messages = append(a.messages, chatMessage{
 					Role: "system", Content: fmt.Sprintf("模型切换为: %s/%s", entry.ProviderName, entry.ModelID),
 				})
-				a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+				a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 				a.viewport.GotoBottom()
 			}
 			a.showModelPicker = false
 			return a, nil
 		case "esc":
 			a.showModelPicker = false
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		}
+	}
+
+	// /resume 会话选择器模式
+	if a.showResumePicker {
+		switch key {
+		case "down":
+			a.resumeIdx = (a.resumeIdx + 1) % len(a.resumeSessions)
+			a.viewport.SetContent(a.renderMessages(a.viewport.Height, "", ""))
+			return a, nil
+		case "up":
+			a.resumeIdx = (a.resumeIdx - 1 + len(a.resumeSessions)) % len(a.resumeSessions)
+			a.viewport.SetContent(a.renderMessages(a.viewport.Height, "", ""))
+			return a, nil
+		case "enter":
+			sess := a.resumeSessions[a.resumeIdx]
+			if err := a.sessionMgr.SetActive(sess.ID); err != nil {
+				log.Printf("activate session: %v", err)
+			}
+			a.RestoreSession(sess)
+			a.showResumePicker = false
+			a.resumeSessions = nil
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
+			a.viewport.GotoBottom()
+			return a, nil
+		case "esc":
+			a.showResumePicker = false
+			a.resumeSessions = nil
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 			a.viewport.GotoBottom()
 			return a, nil
 		}
@@ -678,7 +915,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			Role:    "system",
 			Content: "再按一次 Ctrl+C 确认退出（3 秒内有效）",
 		})
-		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 		// 3 秒后自动重置 confirmQuit
 		return a, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 			return confirmQuitResetMsg{}
@@ -690,7 +927,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.cancelFunc = nil
 			a.loading = false
 			a.messages = append(a.messages, chatMessage{Role: "system", Content: "请求已取消"})
-			a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+			a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 			return a, nil
 		}
 		a.textArea.Reset()
@@ -780,7 +1017,7 @@ func (a *App) handleEnter() (tea.Model, tea.Cmd) {
 			Role:    "system",
 			Content: fmt.Sprintf("已加入队列 (%d 待处理)", queueLen),
 		})
-		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+		a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 		a.viewport.GotoBottom()
 		return a, nil
 	}
@@ -789,7 +1026,7 @@ func (a *App) handleEnter() (tea.Model, tea.Cmd) {
 	a.loading = true
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancelFunc = cancel
-	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+	a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 	a.viewport.GotoBottom()
 	return a, a.runAgent(ctx, input)
 }
@@ -817,6 +1054,7 @@ func (a *App) handleCommand(cmd string) (tea.Model, tea.Cmd) {
   /clear     清空聊天
   /cost      显示成本
   /budget    设置/查看预算上限
+  /resume    列出历史会话并选择恢复
   /compact   压缩上下文历史
   /remember  记住一条项目事实(下次会话自动注入)
   /env       环境变量管理
@@ -927,6 +1165,9 @@ Budget:
 
 	case "/sessions":
 		return a.handleSessionsCmd(parts)
+
+	case "/resume":
+		return a.handleResumeCmd(parts)
 
 	case "/compact":
 		return a.handleCompactCmd()
@@ -1070,7 +1311,7 @@ func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 			models := a.provider.Models()
 			if len(models) == 0 {
 				a.messages = append(a.messages, chatMessage{Role: "system", Content: "当前 Provider 没有注册模型"})
-				a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+				a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 				a.viewport.GotoBottom()
 				return a, nil
 			}
@@ -1091,8 +1332,7 @@ func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.showModelPicker = true
-		a.viewport.SetContent(a.renderMessages(a.height-8, ""))
-		a.viewport.GotoBottom()
+		a.viewport.SetContent(a.renderMessages(a.viewport.Height, "", ""))
 		return a, nil
 	}
 
@@ -1119,7 +1359,7 @@ func (a *App) handleModelCmd(parts []string) (tea.Model, tea.Cmd) {
 	a.agent.SetModel(newModel)
 	a.persistModelChange() // 持久化切换，下次启动恢复
 	a.messages = append(a.messages, chatMessage{Role: "system", Content: fmt.Sprintf("模型切换为: %s/%s", a.provider.Name(), newModel)})
-	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+	a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 	a.viewport.GotoBottom()
 	return a, nil
 }
@@ -1197,6 +1437,25 @@ func (a *App) handleSessionsCmd(parts []string) (tea.Model, tea.Cmd) {
 			}
 			a.RestoreSession(sess)
 			return a, nil
+		case "rename":
+			if len(parts) < 4 {
+				a.messages = append(a.messages, chatMessage{
+					Role: "system", Content: "用法: /sessions rename <ID> <新名称>",
+				})
+				return a, nil
+			}
+			id := parts[2]
+			name := strings.Join(parts[3:], " ")
+			if err := a.sessionMgr.UpdateName(id, name); err != nil {
+				a.messages = append(a.messages, chatMessage{
+					Role: "system", Content: fmt.Sprintf("重命名失败: %v", err),
+				})
+				return a, nil
+			}
+			a.messages = append(a.messages, chatMessage{
+				Role: "system", Content: fmt.Sprintf("✓ 会话 %s 已重命名为: %s", id, name),
+			})
+			return a, nil
 		}
 	}
 
@@ -1220,6 +1479,56 @@ func (a *App) handleSessionsCmd(parts []string) (tea.Model, tea.Cmd) {
 	}
 	sb.WriteString("\n使用 /sessions switch <ID> 切换会话")
 	a.messages = append(a.messages, chatMessage{Role: "system", Content: sb.String()})
+	return a, nil
+}
+
+// handleResumeCmd 列出历史会话，接受 /resume <ID> 恢复指定会话。
+// 无参数时進入交互式選擇模式（方向鍵選擇，Enter 確認）。
+func (a *App) handleResumeCmd(parts []string) (tea.Model, tea.Cmd) {
+	if a.sessionMgr == nil {
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "会话管理器未初始化"})
+		return a, nil
+	}
+
+	// 有参数时恢复指定会话
+	if len(parts) >= 2 {
+		sessID := parts[1]
+		sess, ok := a.sessionMgr.Get(sessID)
+		if !ok {
+			a.messages = append(a.messages, chatMessage{
+				Role: "system", Content: fmt.Sprintf("会话 %q 不存在。使用 /resume 列出所有会话。", sessID),
+			})
+			return a, nil
+		}
+		if err := a.sessionMgr.SetActive(sessID); err != nil {
+			log.Printf("activate session: %v", err)
+		}
+		a.RestoreSession(sess)
+		return a, nil
+	}
+
+	sessions := a.sessionMgr.List()
+	if len(sessions) == 0 {
+		a.messages = append(a.messages, chatMessage{
+			Role: "system", Content: "暂无历史会话。使用 --session <ID> 或 /sessions new <名称> 创建。",
+		})
+		return a, nil
+	}
+
+	// 进入交互式选择模式
+	a.showResumePicker = true
+	a.resumeSessions = sessions
+	a.resumeIdx = 0
+	// 如果当前有活跃会话，默认选中它
+	if a.activeSess != nil {
+		for i, s := range sessions {
+			if s.ID == a.activeSess.ID {
+				a.resumeIdx = i
+				break
+			}
+		}
+	}
+	a.viewport.SetContent(a.renderMessages(a.viewport.Height, "", ""))
 	return a, nil
 }
 
@@ -1258,7 +1567,7 @@ func (a *App) handleCompactCmd() (tea.Model, tea.Cmd) {
 	newMessages = append(newMessages, a.messages[len(a.messages)-keepRecent:]...)
 	a.messages = newMessages
 
-	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+	a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 	a.messages = append(a.messages, chatMessage{
 		Role: "system", Content: fmt.Sprintf("上下文已压缩：保留最近 %d 条消息，中间 %d 条已摘要。", keepRecent, len(middle)),
 	})
@@ -1286,6 +1595,56 @@ func (a *App) View() string {
 		return "Initializing...\n"
 	}
 
+	// 动态计算各部分高度，确保 View() 返回的总高度 == a.height，
+	// 防止终端整屏滚动（viewport 应独占内部滚动）。
+	titleH := lipgloss.Height(a.renderTitle())
+	sepH := 1
+	statusBar := a.renderStatusBar()
+	statusH := lipgloss.Height(statusBar)
+	textareaView := a.textArea.View()
+	textareaH := lipgloss.Height(textareaView)
+
+	activityH := 0
+	if a.loading {
+		activityH = 1
+	}
+
+	approvalH := 0
+	if a.pendingApproval != nil {
+		approvalH = lipgloss.Height(a.renderApproval()) + 2 // +2 for surrounding \n
+	}
+
+	outsideH := 0
+	if a.pendingOutside != nil {
+		outsideH = lipgloss.Height(a.renderOutsideAccess()) + 2 // +2 for surrounding \n
+	}
+
+	suggestionsH := 0
+	if a.showSuggestions && len(a.suggestions) > 0 {
+		suggestionsH = len(a.suggestions)
+	}
+
+	// 固定部分高度（不包括 viewport）
+	// viewport 部分占 viewport.Height + 1（后面有一个 \n）
+	fixedH := titleH + sepH + activityH + approvalH + outsideH + suggestionsH + textareaH + statusH
+	targetVpHeight := a.height - fixedH - 1 // -1 for the \n after viewport
+	if targetVpHeight < 3 {
+		targetVpHeight = 3
+	}
+
+	// viewport 尚未初始化时（极小终端或启动顺序差异），用当前尺寸兜底创建。
+	if a.viewport.Width == 0 {
+		a.viewport = viewport.New(a.width, targetVpHeight)
+		a.viewport.MouseWheelEnabled = true
+	}
+
+	// 如果 viewport 高度需要调整，更新它并重新设置内容
+	if a.viewport.Height != targetVpHeight {
+		a.viewport.Height = targetVpHeight
+		a.viewport.SetContent(a.renderMessages(targetVpHeight, "", ""))
+		a.viewport.GotoBottom()
+	}
+
 	var sb strings.Builder
 
 	// 标题栏
@@ -1303,8 +1662,17 @@ func (a *App) View() string {
 	// Agent 活动状态
 	if a.loading {
 		activity := "思考中..."
-		if a.lastTool != "" {
-			activity = fmt.Sprintf("第 %d 步 · 🔧 %s", a.lastStep, a.lastTool)
+		if a.lastStep > 0 {
+			switch a.activityPhase {
+			case "tool":
+				if a.lastTool != "" {
+					activity = fmt.Sprintf("第 %d 步 · 🔧 %s", a.lastStep, a.lastTool)
+				} else {
+					activity = fmt.Sprintf("第 %d 步 · 执行工具", a.lastStep)
+				}
+			default:
+				activity = fmt.Sprintf("第 %d 步 · 思考中...", a.lastStep)
+			}
 		}
 		sb.WriteString(activityStyle.Render(fmt.Sprintf(" %s", activity)))
 		sb.WriteString("\n")
@@ -1314,6 +1682,13 @@ func (a *App) View() string {
 	if a.pendingApproval != nil {
 		sb.WriteString("\n")
 		sb.WriteString(a.renderApproval())
+		sb.WriteString("\n")
+	}
+
+	// 工作区外文件访问授权提示
+	if a.pendingOutside != nil {
+		sb.WriteString("\n")
+		sb.WriteString(a.renderOutsideAccess())
 		sb.WriteString("\n")
 	}
 
@@ -1330,11 +1705,11 @@ func (a *App) View() string {
 	}
 
 	// 输入区域（textarea）
-	sb.WriteString(a.textArea.View())
+	sb.WriteString(textareaView)
 	sb.WriteString("\n")
 
 	// 状态栏
-	sb.WriteString(a.renderStatusBar())
+	sb.WriteString(statusBar)
 
 	return sb.String()
 }
@@ -1349,7 +1724,7 @@ func (a *App) renderTitle() string {
 	return headerStyle.Width(a.width).Render(title)
 }
 
-func (a *App) renderMessages(visibleLines int, streamBuf string) string {
+func (a *App) renderMessages(visibleLines int, streamBuf, streamReasoningBuf string) string {
 	var sb strings.Builder
 
 	for _, msg := range a.messages {
@@ -1361,6 +1736,10 @@ func (a *App) renderMessages(visibleLines int, streamBuf string) string {
 			sb.WriteString(userStyle.Render("▸ " + msg.Content))
 			sb.WriteString("\n")
 		case "assistant":
+			// 先渲染思考过程（灰色折叠样式），再渲染正式回答。
+			if msg.ReasoningContent != "" {
+				a.renderReasoning(&sb, msg.ReasoningContent)
+			}
 			// 尝试用 glamour 渲染 markdown
 			rendered := a.renderMarkdown(msg.Content)
 			for _, line := range strings.Split(rendered, "\n") {
@@ -1381,67 +1760,26 @@ func (a *App) renderMessages(visibleLines int, streamBuf string) string {
 		}
 	}
 
-	// 模型选择器：实时渲染（不持久化到 messages）
+	// /resume 会话选择器：独占 viewport，支持方向键导航。
+	if a.showResumePicker {
+		a.renderResumePicker(&sb, visibleLines)
+	}
+
+	// 模型选择器：实时渲染（不持久化到 messages）。
+	// 当选择器打开时，独占 viewport 以最大化列表可见区域，并对长列表做窗口滚动，
+	// 保证上下键移动时当前选中项始终可见。
 	if a.showModelPicker {
-		sb.WriteString("\n")
-		sb.WriteString(systemStyle.Render("选择模型 (↑↓ 移动, Enter 确认, Esc 取消):"))
-		sb.WriteString("\n\n")
-		sb.WriteString(systemStyle.Render(fmt.Sprintf("当前: %s/%s", a.provider.Name(), a.model)))
-		sb.WriteString("\n\n")
-		// 按 provider 分组显示
-		currentProviderName := a.provider.Name()
-		// 先显示当前 provider
-		sb.WriteString(systemStyle.Render(fmt.Sprintf("[%s]", currentProviderName)))
-		sb.WriteString("\n")
-		for i, e := range a.modelList {
-			if e.ProviderName != currentProviderName {
-				continue
-			}
-			marker := "  "
-			if i == a.modelIdx {
-				marker = "▶ "
-			}
-			sb.WriteString(systemStyle.Render(fmt.Sprintf("%s%s", marker, e.ModelID)))
-			sb.WriteString("\n")
-		}
-		// 再显示其他 provider
-		for _, p := range a.allProviders {
-			if p.Name() == currentProviderName {
-				continue
-			}
-			hasModels := false
-			for _, e := range a.modelList {
-				if e.ProviderName == p.Name() {
-					hasModels = true
-					break
-				}
-			}
-			if !hasModels {
-				continue
-			}
-			sb.WriteString("\n")
-			sb.WriteString(systemStyle.Render(fmt.Sprintf("[%s]", p.Name())))
-			sb.WriteString("\n")
-			for i, e := range a.modelList {
-				if e.ProviderName != p.Name() {
-					continue
-				}
-				marker := "  "
-				if i == a.modelIdx {
-					marker = "▶ "
-				}
-				sb.WriteString(systemStyle.Render(fmt.Sprintf("%s%s", marker, e.ModelID)))
-				sb.WriteString("\n")
-			}
-		}
+		a.renderModelPicker(&sb, visibleLines)
+	}
+
+	// 流式思考过程缓冲
+	if a.loading && streamReasoningBuf != "" {
+		a.renderReasoning(&sb, streamReasoningBuf)
 	}
 
 	// 流式输出缓冲
-	a.streamMu.Lock()
-	buf := a.streamBuf
-	a.streamMu.Unlock()
-	if a.loading && buf != "" {
-		rendered := a.renderMarkdown(buf)
+	if a.loading && streamBuf != "" {
+		rendered := a.renderMarkdown(streamBuf)
 		for _, line := range strings.Split(rendered, "\n") {
 			sb.WriteString(assistantStyle.Render("  " + line))
 			sb.WriteString("\n")
@@ -1451,29 +1789,33 @@ func (a *App) renderMessages(visibleLines int, streamBuf string) string {
 	return sb.String()
 }
 
+// renderReasoning 以灰色斜体折叠样式渲染模型的思考过程。
+func (a *App) renderReasoning(sb *strings.Builder, reasoning string) {
+	reasoningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	lines := strings.Split(reasoning, "\n")
+	for _, line := range lines {
+		sb.WriteString(reasoningStyle.Render("    " + line))
+		sb.WriteString("\n")
+	}
+}
+
 // renderWelcome 渲染欢迎界面（Logo + Tips + 状态）
 func (a *App) renderWelcome() string {
 	var sb strings.Builder
 
-	// DNA 双螺旋配色
-	loomcodeStyle := lipgloss.NewStyle().Bold(true)
-	blue := lipgloss.Color("39") // #00BFFF
-	cyan := lipgloss.Color("43") // #00CED1
-	dim := lipgloss.Color("24")  // #585858
-	verStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
-	tipStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	// 单色 Logo（Loom = 织机）— 使用注册表样式
+	blue := lipgloss.Color(colorLogoAccent)
 
-	// 每行用不同颜色交替（模拟双螺旋）
 	logo := []struct {
 		text  string
 		color lipgloss.TerminalColor
 	}{
-		{"  ██╗  ██╗███████╗██╗     ██╗███████╗", blue},
-		{"  ██║  ██║██╔════╝██║     ██║██╔════╝", cyan},
-		{"  ███████║█████╗  ██║     ██║█████╗  ", blue},
-		{"  ██╔══██║██╔══╝  ██║     ██║██╔══╝  ", cyan},
-		{"  ██║  ██║███████╗███████╗██║███████╗", blue},
-		{"  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝╚══════╝", dim},
+		{"  ██╗        █████╗    █████╗   ███╗   ███╗", blue},
+		{"  ██║       ██╔══██╗  ██╔══██╗  ████╗ ████║", blue},
+		{"  ██║       ██║  ██║  ██║  ██║  ██╔████╔██║", blue},
+		{"  ██║       ██║  ██║  ██║  ██║  ██║╚██╔╝██║", blue},
+		{"  ███████╗  ╚█████╔╝  ╚█████╔╝  ██║ ╚═╝ ██║", blue},
+		{"  ╚══════╝   ╚════╝    ╚════╝   ╚═╝     ╚═╝", blue},
 	}
 
 	tips := []string{
@@ -1492,7 +1834,7 @@ func (a *App) renderWelcome() string {
 	for i := 0; i < maxLines; i++ {
 		left := ""
 		if i < len(logo) {
-			left = loomcodeStyle.Foreground(logo[i].color).Render(logo[i].text)
+			left = logoStyle.Foreground(logo[i].color).Render(logo[i].text)
 		}
 		right := ""
 		if i == 0 {
@@ -1504,6 +1846,117 @@ func (a *App) renderWelcome() string {
 	}
 
 	return sb.String()
+}
+
+// renderResumePicker 渲染 /resume 会话选择器。
+// 显示可滚动的会话列表，当前选中项高亮显示。
+func (a *App) renderResumePicker(sb *strings.Builder, visibleLines int) {
+	const headerLines = 4 // 标题 + 表头 + 分隔线 + 提示共 4 行
+	minWindowSize := 3
+
+	windowSize := visibleLines - headerLines
+	if windowSize < minWindowSize {
+		windowSize = minWindowSize
+	}
+	if windowSize > len(a.resumeSessions) {
+		windowSize = len(a.resumeSessions)
+	}
+
+	// 窗口起始索引：确保当前选中项在窗口内
+	startIdx := 0
+	if a.resumeIdx >= windowSize {
+		startIdx = a.resumeIdx - windowSize + 1
+	}
+	endIdx := startIdx + windowSize
+	if endIdx > len(a.resumeSessions) {
+		endIdx = len(a.resumeSessions)
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(systemStyle.Render("选择历史会话 (↑↓ 移动, Enter 确认, Esc 取消):"))
+	sb.WriteString("\n\n")
+	fmt.Fprintf(sb, "  %-30s %-20s %8s  %s\n", "ID", "名称", "消息数", "更新时间")
+	fmt.Fprintf(sb, "  %s\n", strings.Repeat("─", 75))
+
+	for i := startIdx; i < endIdx; i++ {
+		s := a.resumeSessions[i]
+		marker := "  "
+		if i == a.resumeIdx {
+			marker = "▶ "
+		}
+		msgCount := len(s.Messages)
+		line := fmt.Sprintf("%s%-30s %-20s %8d  %s",
+			marker, s.ID, s.Name, msgCount, s.UpdatedAt.Format("01-02 15:04"))
+		if i == a.resumeIdx {
+			sb.WriteString(suggestionSel.Render(line))
+		} else {
+			sb.WriteString(suggestionStyle.Render(line))
+		}
+		sb.WriteString("\n")
+	}
+
+	// 列表超长时给出滚动提示
+	if len(a.resumeSessions) > windowSize {
+		sb.WriteString("\n")
+		sb.WriteString(systemStyle.Render(fmt.Sprintf("(%d/%d) 按 ↑↓ 继续滚动", a.resumeIdx+1, len(a.resumeSessions))))
+	}
+}
+
+// renderModelPicker 渲染 /model 模型选择器。
+// 对超出可见高度的长列表做窗口切片，确保当前选中项始终可见。
+func (a *App) renderModelPicker(sb *strings.Builder, visibleLines int) {
+	const headerLines = 6 // 选择器标题、当前模型与前后空行共 6 行
+	minWindowSize := 3
+
+	windowSize := visibleLines - headerLines
+	if windowSize < minWindowSize {
+		windowSize = minWindowSize
+	}
+	if windowSize > len(a.modelList) {
+		windowSize = len(a.modelList)
+	}
+
+	// 窗口起始索引：选中项位于窗口内；若列表较短则从顶部开始。
+	startIdx := 0
+	if a.modelIdx >= windowSize {
+		startIdx = a.modelIdx - windowSize + 1
+	}
+	endIdx := startIdx + windowSize
+	if endIdx > len(a.modelList) {
+		endIdx = len(a.modelList)
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(systemStyle.Render("选择模型 (↑↓ 移动, Enter 确认, Esc 取消):"))
+	sb.WriteString("\n\n")
+	sb.WriteString(systemStyle.Render(fmt.Sprintf("当前: %s/%s", a.provider.Name(), a.model)))
+	sb.WriteString("\n\n")
+
+	// 按 provider 分组显示窗口内的模型项。
+	lastProvider := ""
+	for i := startIdx; i < endIdx; i++ {
+		e := a.modelList[i]
+		if e.ProviderName != lastProvider {
+			if lastProvider != "" {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(systemStyle.Render(fmt.Sprintf("[%s]", e.ProviderName)))
+			sb.WriteString("\n")
+			lastProvider = e.ProviderName
+		}
+		marker := "  "
+		if i == a.modelIdx {
+			marker = "▶ "
+		}
+		sb.WriteString(systemStyle.Render(fmt.Sprintf("%s%s", marker, e.ModelID)))
+		sb.WriteString("\n")
+	}
+
+	// 列表超长时给出滚动提示。
+	if len(a.modelList) > windowSize {
+		sb.WriteString("\n")
+		sb.WriteString(systemStyle.Render(fmt.Sprintf("(%d/%d) 按 ↑↓ 继续滚动", a.modelIdx+1, len(a.modelList))))
+	}
 }
 
 // newGlamourRenderer 根据终端背景色创建 glamour 渲染器。
@@ -1681,6 +2134,17 @@ func (a *App) renderApproval() string {
 	return sb.String()
 }
 
+func (a *App) renderOutsideAccess() string {
+	po := a.pendingOutside
+	var sb strings.Builder
+
+	sb.WriteString(approvalTitleStyle.Render(fmt.Sprintf("  ⚠ 请求访问工作区外文件: %s", po.path)))
+	sb.WriteString("\n")
+	sb.WriteString(approvalHelpStyle.Render("  t 临时访问 | p 永久访问 | n/Esc 拒绝"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
 func renderWriteDiff(pw *pendingWrite) string {
 	var sb strings.Builder
 	lines := strings.Split(pw.newContent, "\n")
@@ -1743,13 +2207,13 @@ func (a *App) runAgent(ctx context.Context, input string) tea.Cmd {
 
 		for textCh != nil || errCh != nil {
 			select {
-			case text, ok := <-textCh:
+			case chunk, ok := <-textCh:
 				if !ok {
 					textCh = nil
 					break
 				}
 				if a.program != nil {
-					a.program.Send(streamChunkMsg(text))
+					a.program.Send(streamChunkMsg(chunk))
 				}
 			case err, ok := <-errCh:
 				if !ok {
@@ -1771,7 +2235,7 @@ func (a *App) runAgent(ctx context.Context, input string) tea.Cmd {
 }
 
 // 消息类型
-type streamChunkMsg string
+type streamChunkMsg agent.StreamChunk
 type streamDoneMsg struct{}
 type streamErrorMsg string
 
@@ -1794,8 +2258,14 @@ func friendlyError(err string) string {
 		return "请求过于频繁，请稍后重试。"
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded"):
 		return "请求超时，请检查网络连接或稍后重试。"
-	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "dial tcp"):
-		return "无法连接到服务器，请检查网络。"
+	case strings.Contains(lower, "no such host") || strings.Contains(lower, "lookup"):
+		return "DNS 解析失败，无法找到服务器地址。请检查网络连接或 base_url 配置。"
+	case strings.Contains(lower, "connection refused"):
+		return "服务器拒绝连接，请检查 base_url 或服务器状态。"
+	case strings.Contains(lower, "proxy") || strings.Contains(lower, "proxyconnect"):
+		return "代理连接失败，请检查 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量。"
+	case strings.Contains(lower, "dial tcp"):
+		return "无法连接到服务器，请检查网络或代理配置。"
 	case strings.Contains(lower, "503"):
 		return "服务暂时不可用，请稍后重试。"
 	case strings.Contains(lower, "500"):
@@ -1898,6 +2368,12 @@ func (a *App) handleRewindCmd(parts []string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// agent 运行期间禁止恢复，避免并发写文件导致 TOCTOU 竞态（N6）
+	if a.loading {
+		a.messages = append(a.messages, chatMessage{Role: "system", Content: "Agent 正在运行，请等待完成或按 Esc 取消后再执行 /rewind。"})
+		return a, nil
+	}
+
 	// /rewind — 列出最近快照
 	if len(parts) < 2 {
 		checkpoints, err := a.checkpointMgr.List("", 20)
@@ -1942,10 +2418,19 @@ func (a *App) processQueue() tea.Cmd {
 	a.loading = true
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancelFunc = cancel
-	a.viewport.SetContent(a.renderMessages(a.height-8, ""))
+	a.viewport.SetContent(a.renderMessages(a.height-8, "", ""))
 	a.viewport.GotoBottom()
 
 	return a.runAgent(ctx, next)
+}
+
+// truncateString 截断字符串，保留前 n 个字符（完整字符，不计入中文字符的多字节编码）。
+func truncateString(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
 }
 
 // isValidEnvKey 校验环境变量名：仅允许字母、数字、下划线，且不能以数字开头

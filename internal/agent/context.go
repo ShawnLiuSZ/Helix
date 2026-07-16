@@ -157,7 +157,7 @@ func (a *Agent) compactMessages(ctx context.Context, ctxWindow int) {
 		return // 未知模型，不压缩
 	}
 	maxInput := ctxWindow * 80 / 100
-	if estimateTokens(a.messages) <= maxInput {
+	if a.estimateTokens(a.messages) <= maxInput {
 		return
 	}
 
@@ -246,6 +246,9 @@ func (a *Agent) summarize(ctx context.Context, msgs []provider.Message) (string,
 	})
 	if err != nil {
 		return "", provider.Usage{}, err
+	}
+	if resp == nil {
+		return "[Earlier conversation summary]\n(no response)", provider.Usage{}, nil
 	}
 	return "[Earlier conversation summary]\n" + resp.Content, resp.Usage, nil
 }

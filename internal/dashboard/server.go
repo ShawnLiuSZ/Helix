@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -21,8 +22,11 @@ type Server struct {
 }
 
 // NewServer 创建 Dashboard 服务器（含随机 auth token）。
-func NewServer(addr string) *Server {
-	token := generateAuthToken()
+func NewServer(addr string) (*Server, error) {
+	token, err := generateAuthToken()
+	if err != nil {
+		return nil, err
+	}
 	s := &Server{
 		addr:      loopbackAddr(addr),
 		mux:       http.NewServeMux(),
@@ -30,7 +34,7 @@ func NewServer(addr string) *Server {
 		authToken: token,
 	}
 	s.routes()
-	return s
+	return s, nil
 }
 
 // AuthToken 返回启动时生成的认证 token，供外部获取并传给浏览器。
@@ -39,12 +43,12 @@ func (s *Server) AuthToken() string {
 }
 
 // generateAuthToken 生成 32 字节随机 hex token。
-func generateAuthToken() string {
+func generateAuthToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		panic("dashboard: crypto/rand unavailable: " + err.Error())
+		return "", fmt.Errorf("dashboard: crypto/rand unavailable: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 // loopbackAddr 强制将监听地址绑定到回环网卡（禁止暴露到全网卡）。
@@ -72,6 +76,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/cost", s.requireAuth(s.handleCost))
 	s.mux.HandleFunc("/api/status", s.requireAuth(s.handleStatus))
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
+
+	// 静态资源（CSS/JS）：从 embed.FS 的 static/ 子目录 serve
+	if staticSub, err := fs.Sub(staticFiles, "static"); err == nil {
+		s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+	}
 }
 
 // requireAuth 是中间件：检查 query param token 是否匹配服务端生成的 authToken。
@@ -113,8 +122,12 @@ func (s *Server) Start(ctx context.Context) error {
 	fmt.Printf("Dashboard running at http://%s?token=%s\n", s.addr, s.authToken)
 	fmt.Println("注意：Dashboard 当前返回模拟数据（Mockup），仅用于 UI 原型展示。")
 
+	// 定时广播 cost/status，让 WebSocket 实时链路工作（Mockup 阶段）
+	go s.broadcastTicker(ctx)
+
 	go func() {
 		<-ctx.Done()
+		s.wsHub.Stop()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -126,4 +139,32 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// broadcastTicker 定时通过 WebSocket 广播 cost 和 status 数据。
+// ctx 取消时停止。仅在有 WebSocket 客户端连接时才广播。
+func (s *Server) broadcastTicker(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if s.wsHub.ClientCount() == 0 {
+				continue
+			}
+			s.wsHub.SendJSON("cost", map[string]interface{}{
+				"total":   0.12,
+				"today":   0.03,
+				"history": []float64{0.01, 0.02, 0.03, 0.02, 0.04},
+			})
+			s.wsHub.SendJSON("status", map[string]interface{}{
+				"deepseek": "connected",
+				"mimo":     "connected",
+				"openai":   "disconnected",
+			})
+		}
+	}
 }

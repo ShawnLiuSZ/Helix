@@ -27,13 +27,15 @@ func (c *WSClient) closeSend() {
 	c.closeOnce.Do(func() { close(c.send) })
 }
 
-// WSHub WebSocket 管理器
+// TSHub WebSocket 管理器
 type WSHub struct {
 	clients    map[*WSClient]bool
 	broadcast  chan []byte
 	register   chan *WSClient
 	unregister chan *WSClient
 	mu         sync.RWMutex
+	done       chan struct{}
+	stopOnce   sync.Once
 }
 
 // NewWSHub 创建 WebSocket 管理器
@@ -43,20 +45,31 @@ func NewWSHub() *WSHub {
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *WSClient),
 		unregister: make(chan *WSClient),
+		done:       make(chan struct{}),
 	}
 	go hub.run()
 	return hub
+}
+
+// Stop 停止 WSHub 主循环，让 goroutine 退出（N10）。
+// 使用 sync.Once 保证重复调用不会 panic（close 已关闭 channel）。
+func (h *WSHub) Stop() {
+	h.stopOnce.Do(func() { close(h.done) })
 }
 
 // run WebSocket 管理器主循环
 func (h *WSHub) run() {
 	for {
 		select {
+		case <-h.done:
+			return
+
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
+			total := len(h.clients)
 			h.mu.Unlock()
-			log.Printf("WebSocket client connected: %d total", len(h.clients))
+			log.Printf("WebSocket client connected: %d total", total)
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -64,8 +77,9 @@ func (h *WSHub) run() {
 				delete(h.clients, client)
 				client.closeSend()
 			}
+			total := len(h.clients)
 			h.mu.Unlock()
-			log.Printf("WebSocket client disconnected: %d total", len(h.clients))
+			log.Printf("WebSocket client disconnected: %d total", total)
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
@@ -89,9 +103,12 @@ func (h *WSHub) run() {
 	}
 }
 
-// Broadcast 广播消息到所有客户端
+// Broadcast 广播消息到所有客户端。若 WSHub 已停止，直接丢弃消息避免死锁。
 func (h *WSHub) Broadcast(message []byte) {
-	h.broadcast <- message
+	select {
+	case h.broadcast <- message:
+	case <-h.done:
+	}
 }
 
 // ClientCount 返回当前连接数
@@ -141,13 +158,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			send: make(chan []byte, 256),
 		}
 
-		hub.register <- client
+		select {
+		case hub.register <- client:
+		case <-hub.done:
+			return
+		}
 
 		// 读循环（仅用于检测断开）。
 		// 每次收到消息后刷新读 deadline，避免健康连接被一次性 60s deadline 误杀（R2）。
 		go func() {
 			defer func() {
-				hub.unregister <- client
+				select {
+				case hub.unregister <- client:
+				case <-hub.done:
+				}
 			}()
 			for {
 				_ = ws.SetReadDeadline(time.Now().Add(120 * time.Second))

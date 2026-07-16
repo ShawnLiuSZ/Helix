@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ShawnLiuSZ/loomcode/internal/provider"
+	"github.com/ShawnLiuSZ/loomcode/internal/session"
 	"github.com/ShawnLiuSZ/loomcode/internal/testutil"
 	"github.com/ShawnLiuSZ/loomcode/internal/tool"
 )
@@ -196,7 +197,7 @@ func TestModelPickerShowsAllProvidersWithArrowMovement(t *testing.T) {
 	}
 
 	// 验证渲染输出包含模型选择器界面
-	rendered := app2.renderMessages(30, "")
+	rendered := app2.renderMessages(30, "", "")
 	if !strings.Contains(rendered, "▶ ds-v4-flash") {
 		t.Errorf("expected rendered picker to show arrow on first model, got:\n%s", rendered)
 	}
@@ -219,7 +220,7 @@ func TestModelPickerShowsAllProvidersWithArrowMovement(t *testing.T) {
 	if result.modelIdx != 1 {
 		t.Errorf("expected modelIdx 1 after down arrow, got %d", result.modelIdx)
 	}
-	rendered = result.renderMessages(30, "")
+	rendered = result.renderMessages(30, "", "")
 	if !strings.Contains(rendered, "▶ ds-v4-pro") {
 		t.Errorf("expected arrow on ds-v4-pro after down, got:\n%s", rendered)
 	}
@@ -285,8 +286,8 @@ func TestStreamMessagesAccumulateAndFinalize(t *testing.T) {
 	app.loading = true
 
 	var m tea.Model = app
-	m, _ = m.Update(streamChunkMsg("hello "))
-	m, _ = m.Update(streamChunkMsg("world"))
+	m, _ = m.Update(streamChunkMsg{Content: "hello "})
+	m, _ = m.Update(streamChunkMsg{Content: "world"})
 
 	result := m.(*App)
 	if result.streamBuf != "hello world" {
@@ -330,5 +331,56 @@ func TestStreamErrorClearsBuffer(t *testing.T) {
 	lastMsg := result.messages[len(result.messages)-1]
 	if lastMsg.Role != "error" {
 		t.Errorf("expected last message role 'error', got %q", lastMsg.Role)
+	}
+}
+
+func TestResumeCmd_EntersPickerAndRendersViewport(t *testing.T) {
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	mgr, err := session.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	app.SetSessionManager(mgr)
+	mgr.Create("old session", "model", "provider")
+
+	var m tea.Model = app
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/resume")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	result := m.(*App)
+	if !result.showResumePicker {
+		t.Error("expected resume picker to be shown")
+	}
+	if !strings.Contains(result.viewport.View(), "old session") {
+		t.Errorf("expected viewport to render resume picker with session name, got:\n%s", result.viewport.View())
+	}
+}
+
+func TestSaveSession_RenamesDefaultSessionFromFirstUserMessage(t *testing.T) {
+	app := newTestApp()
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	mgr, err := session.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	app.SetSessionManager(mgr)
+
+	// 创建一个名为 default 的会话并恢复它（模拟 /resume 后首个任务）
+	sess := mgr.Create("default", "model", "provider")
+	app.RestoreSession(sess)
+
+	// 模拟用户发送任务
+	app.messages = append(app.messages, chatMessage{Role: "user", Content: "implement login feature"})
+	app.saveSession()
+
+	restored, ok := mgr.Get(sess.ID)
+	if !ok {
+		t.Fatal("session not found after save")
+	}
+	if restored.Name != "implement login feature" {
+		t.Errorf("expected session name renamed to first user message, got %q", restored.Name)
 	}
 }

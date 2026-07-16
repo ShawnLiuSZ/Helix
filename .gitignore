@@ -2,7 +2,6 @@
 bin/
 /loomcode
 /loom
-/helix
 *.exe
 *.dll
 *.so
@@ -53,5 +52,3 @@ dist/
 
 # CodeBuddy local settings (contains tokens)
 .codebuddy/settings.local.json
-
-/loomcode

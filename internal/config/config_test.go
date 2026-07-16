@@ -67,6 +67,8 @@ func TestLoadConfig_MissingAPIKey(t *testing.T) {
 	content := `
 [[providers]]
 name        = "test"
+kind        = "openai"
+base_url    = "https://api.example.com/v1"
 api_key_env = "MISSING_KEY"
 
   [[providers.models]]
@@ -76,10 +78,14 @@ api_key_env = "MISSING_KEY"
 		t.Fatalf("write config: %v", err)
 	}
 
-	// 不设置环境变量，应该报错
-	_, err := Load(path)
-	if err == nil {
-		t.Error("expected error for missing API key env var")
+	// 不设置环境变量，应加载成功（打印警告但不阻止），
+	// 模型仍可在 /model 中列出，仅实际调用时才会鉴权失败。
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() should succeed with missing API key (warn-only), got error: %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Models[0].ID != "m1" {
+		t.Errorf("expected provider 'test' with model 'm1', got %+v", cfg.Providers)
 	}
 }
 
@@ -127,6 +133,231 @@ func TestLoadDefault(t *testing.T) {
 	}
 	if cfg.DefaultProvider != "deepseek" {
 		t.Errorf("DefaultProvider = %q", cfg.DefaultProvider)
+	}
+}
+
+func TestLoadDefault_EmptyLocalFallsBack(t *testing.T) {
+	// 模拟项目目录： loomcode.toml 只有注释，没有 provider
+	projectDir := t.TempDir()
+	globalDir := t.TempDir()
+
+	emptyLocal := filepath.Join(projectDir, "loomcode.toml")
+	if err := os.WriteFile(emptyLocal, []byte("# 配置已移到 ~/.loomcode/loomcode.toml\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	globalConfigDir := filepath.Join(globalDir, ".loomcode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	globalConfig := filepath.Join(globalConfigDir, "loomcode.toml")
+	content := `
+default_provider = "mimo"
+
+[[providers]]
+name         = "mimo"
+display_name = "MiMo"
+kind         = "mimo"
+base_url     = "https://api.mimo.xiaomi.com/v1"
+api_key_env  = "MIMO_API_KEY"
+
+  [[providers.models]]
+  id   = "mimo-v2.5-pro"
+  name = "MiMo V2.5 Pro"
+  context_window = 262144
+`
+	if err := os.WriteFile(globalConfig, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", globalDir)
+	t.Setenv("MIMO_API_KEY", "test-key")
+	t.Chdir(projectDir)
+
+	cfg, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault() error: %v", err)
+	}
+	if cfg.DefaultProvider != "mimo" {
+		t.Errorf("DefaultProvider = %q, want %q", cfg.DefaultProvider, "mimo")
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "mimo" {
+		t.Errorf("expected provider 'mimo', got %+v", cfg.Providers)
+	}
+}
+
+func TestLoadDefault_AllEmptyFallsBackToDefault(t *testing.T) {
+	projectDir := t.TempDir()
+	globalDir := t.TempDir()
+
+	emptyLocal := filepath.Join(projectDir, "loomcode.toml")
+	if err := os.WriteFile(emptyLocal, []byte("# empty\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	globalConfigDir := filepath.Join(globalDir, ".loomcode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	emptyGlobal := filepath.Join(globalConfigDir, "loomcode.toml")
+	if err := os.WriteFile(emptyGlobal, []byte("# empty\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", globalDir)
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
+	t.Chdir(projectDir)
+
+	cfg, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault() error: %v", err)
+	}
+	if cfg.DefaultProvider != "deepseek" {
+		t.Errorf("DefaultProvider = %q, want %q", cfg.DefaultProvider, "deepseek")
+	}
+	if len(cfg.Providers) == 0 {
+		t.Error("expected default providers")
+	}
+}
+
+func TestLoadConfig_JSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.json")
+
+	content := `{
+  "default_provider": "openai",
+  "providers": [
+    {
+      "name": "openai",
+      "kind": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "context_window": 128000,
+          "capabilities": { "tool_call": true }
+        }
+      ]
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.DefaultProvider != "openai" {
+		t.Errorf("DefaultProvider = %q, want %q", cfg.DefaultProvider, "openai")
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" {
+		t.Errorf("expected provider 'openai', got %+v", cfg.Providers)
+	}
+}
+
+func TestLoadDefault_ModelsJSON(t *testing.T) {
+	projectDir := t.TempDir()
+	globalDir := t.TempDir()
+
+	globalConfigDir := filepath.Join(globalDir, ".loomcode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	modelsJSON := filepath.Join(globalConfigDir, "models.json")
+	content := `{
+  "default_provider": "mimo",
+  "providers": [
+    {
+      "name": "mimo",
+      "kind": "mimo",
+      "base_url": "https://api.mimo.xiaomi.com/v1",
+      "api_key_env": "MIMO_API_KEY",
+      "models": [{ "id": "mimo-v2.5-pro", "context_window": 262144 }]
+    }
+  ]
+}`
+	if err := os.WriteFile(modelsJSON, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", globalDir)
+	t.Setenv("MIMO_API_KEY", "test-key")
+	t.Chdir(projectDir)
+
+	cfg, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault() error: %v", err)
+	}
+	if cfg.DefaultProvider != "mimo" {
+		t.Errorf("DefaultProvider = %q, want %q", cfg.DefaultProvider, "mimo")
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "mimo" {
+		t.Errorf("expected provider 'mimo', got %+v", cfg.Providers)
+	}
+}
+
+func TestLoadDefault_ModelsTomlPriorityOverDeprecatedGlobal(t *testing.T) {
+	projectDir := t.TempDir()
+	globalDir := t.TempDir()
+
+	globalConfigDir := filepath.Join(globalDir, ".loomcode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	modelsTOML := filepath.Join(globalConfigDir, "models.toml")
+	if err := os.WriteFile(modelsTOML, []byte(`
+default_provider = "mimo"
+
+[[providers]]
+name      = "mimo"
+kind      = "mimo"
+base_url  = "https://api.mimo.xiaomi.com/v1"
+api_key_env = "MIMO_API_KEY"
+
+  [[providers.models]]
+  id = "mimo-v2.5-pro"
+  context_window = 262144
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	deprecatedGlobal := filepath.Join(globalConfigDir, "loomcode.toml")
+	if err := os.WriteFile(deprecatedGlobal, []byte(`
+default_provider = "openai"
+
+[[providers]]
+name      = "openai"
+kind      = "openai"
+base_url  = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+  [[providers.models]]
+  id = "gpt-4o"
+  context_window = 128000
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", globalDir)
+	t.Setenv("MIMO_API_KEY", "test-key")
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Chdir(projectDir)
+
+	cfg, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault() error: %v", err)
+	}
+	if cfg.DefaultProvider != "mimo" {
+		t.Errorf("DefaultProvider = %q, want %q (models.toml should win)", cfg.DefaultProvider, "mimo")
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "mimo" {
+		t.Errorf("expected provider 'mimo', got %+v", cfg.Providers)
 	}
 }
 

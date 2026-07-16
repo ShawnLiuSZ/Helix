@@ -62,11 +62,12 @@ type MultiAgent struct {
 	goal      *GoalStopCondition
 	skillsMgr *skills.Manager
 	memory    MemoryProvider
-	onCost    func(float64)
-	effort    *EffortManager
-	workDir   string
-	hooks     *tool.HookManager
-	eventLog  *EventLog // 共享事件日志（聚合所有内部 Agent 的缓存统计）
+	onCost     func(float64)
+	onProgress func(step int, phase, tool string)
+	effort     *EffortManager
+	workDir    string
+	hooks      *tool.HookManager
+	eventLog   *EventLog // 共享事件日志（聚合所有内部 Agent 的缓存统计）
 
 	plan string
 	spec string
@@ -169,6 +170,11 @@ func (a *MultiAgent) SetCostCallback(fn func(float64)) {
 	a.onCost = fn
 }
 
+// SetProgressCallback 设置进度回调，UI 据此显示当前步骤与工具名。
+func (a *MultiAgent) SetProgressCallback(fn func(step int, phase, tool string)) {
+	a.onProgress = fn
+}
+
 // SetCostBudget 设置成本预算上限
 func (a *MultiAgent) SetCostBudget(b float64) {
 	a.costBudget = b
@@ -229,7 +235,7 @@ func (a *MultiAgent) Run(ctx context.Context, task string) (string, error) {
 }
 
 // RunStream 流式执行任务（仅 Build 模式支持）
-func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string, <-chan error) {
+func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan StreamChunk, <-chan error) {
 	ag := New(a.provider, a.tools)
 	ag.SetEventLog(a.eventLog) // 共享 eventLog，聚合内部 Agent 的 token/缓存统计到 UI 状态栏
 	ag.SetMaxSteps(a.maxSteps)
@@ -247,6 +253,9 @@ func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string,
 	if a.onCost != nil {
 		ag.SetCostCallback(a.onCost)
 	}
+	if a.onProgress != nil {
+		ag.SetProgressCallback(a.onProgress)
+	}
 	if a.costBudget > 0 {
 		ag.SetCostBudget(a.costBudget)
 	}
@@ -259,27 +268,48 @@ func (a *MultiAgent) RunStream(ctx context.Context, task string) (<-chan string,
 	for _, g := range a.guards {
 		ag.AddGuard(g)
 	}
+	// D1 修复：RunStream 需与 runBuild 一致地传播 Goal 停止条件，
+	// 否则用户通过 /goal 设置的停止条件在 TUI 流式主模式下被静默忽略。
+	if a.goal.IsEnabled() {
+		ag.SetGoal(a.goal.GetGoal())
+	}
 	ag.SetHistory(a.conversation)
 
 	textCh, errCh := ag.RunStream(ctx, task)
 
 	// 包装通道：流结束后捕获本轮对话，供下一轮延续。
 	// TUI 串行执行（用户等回复后才发下一条），故对 a.conversation 的写入无竞态。
-	outText := make(chan string, 100)
+	outText := make(chan StreamChunk, 100)
 	outErr := make(chan error, 1)
 	go func() {
 		defer close(outText)
 		defer close(outErr)
+		// D2 修复：转发 goroutine 必须响应 ctx 取消。
+		// 若消费方停止读取（UI 崩溃/取消），裸 outText<-t 会永久阻塞，
+		// close(outText) 永不执行，消费方 range 也永久挂起——死锁。
+		// errCh 接收与 outErr 发送同样存在阻塞风险，一并加 select 保护。
 		for t := range textCh {
-			outText <- t
+			select {
+			case outText <- t:
+			case <-ctx.Done():
+				return
+			}
 		}
 		var rerr error
-		if e, ok := <-errCh; ok {
-			rerr = e
+		select {
+		case e, ok := <-errCh:
+			if ok {
+				rerr = e
+			}
+		case <-ctx.Done():
+			return
 		}
 		a.conversation = ag.ConversationMessages()
 		if rerr != nil {
-			outErr <- rerr
+			select {
+			case outErr <- rerr:
+			case <-ctx.Done():
+			}
 		}
 	}()
 	return outText, outErr

@@ -15,6 +15,10 @@ import (
 const maxSubAgentDepth = 3
 const maxAgents = 100
 
+// maxSubAgentLifetime 是单个子 Agent 的最大生命周期。
+// 当 WaitTimeout 的 cancel 因底层网络操作不响应而失效时，硬 deadline 作为最后防线，避免 goroutine 永久泄漏。
+const maxSubAgentLifetime = 30 * time.Minute
+
 // SubAgent 子 Agent
 type SubAgent struct {
 	ID       string
@@ -196,6 +200,12 @@ func (m *SubAgentManager) Cleanup() {
 		sa.mu.Unlock()
 
 		if done && finishedAt.Before(cutoff) {
+			// D6 修复：删除 SubAgent 前必须取消 MessageBus 订阅，
+			// 否则 subscribers map 残留 channel，Send 遍历失效订阅，
+			// 导致内存持续增长。
+			if m.bus != nil {
+				m.bus.Unsubscribe(id)
+			}
 			delete(m.agents, id)
 		}
 	}
@@ -223,6 +233,10 @@ func (m *SubAgentManager) Cleanup() {
 			excess = len(completed)
 		}
 		for i := 0; i < excess; i++ {
+			// D6 修复：maxAgents 超限淘汰路径同样需取消订阅。
+			if m.bus != nil {
+				m.bus.Unsubscribe(completed[i].id)
+			}
 			delete(m.agents, completed[i].id)
 		}
 	}
@@ -244,7 +258,11 @@ func (sa *SubAgent) Run(task string) {
 	go func() {
 		defer close(sa.done)
 
-		result, err := sa.agent.Run(sa.ctx, task)
+		// 为底层 HTTP 调用设置硬 deadline，作为 WaitTimeout cancel 不响应时的最后防线（C4）。
+		runCtx, runCancel := context.WithDeadline(sa.ctx, time.Now().Add(maxSubAgentLifetime))
+		defer runCancel()
+
+		result, err := sa.agent.Run(runCtx, task)
 
 		sa.mu.Lock()
 		defer sa.mu.Unlock()
@@ -353,6 +371,15 @@ func (sa *SubAgent) Wait() {
 
 // WaitTimeout 等待子 Agent 完成（带超时）
 func (sa *SubAgent) WaitTimeout(timeout time.Duration) error {
+	// D4 修复：与 Wait() 保持一致地检查 sa.started。
+	// 未启动的 SubAgent done 永不关闭，直接等待会走完整个超时
+	// 并返回虚假的 timeout 错误。
+	sa.mu.Lock()
+	started := sa.started
+	sa.mu.Unlock()
+	if !started {
+		return nil
+	}
 	select {
 	case <-sa.done:
 		return nil

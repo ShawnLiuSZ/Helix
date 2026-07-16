@@ -316,9 +316,13 @@ func (lb *LoadBalancer) GetMetrics(providerName string) *ProviderMetrics {
 	return lb.metrics[providerName]
 }
 
-// GetProviders 获取所有 Provider
+// GetProviders 获取所有 Provider 的副本，避免暴露内部 slice 底层数组引用。
 func (lb *LoadBalancer) GetProviders() []Provider {
-	return lb.providers
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+	cp := make([]Provider, len(lb.providers))
+	copy(cp, lb.providers)
+	return cp
 }
 
 // AddProvider 添加 Provider
@@ -379,6 +383,8 @@ func (lb *LoadBalancer) Name() string {
 
 // Models 实现 Provider 接口的 Models 方法
 func (lb *LoadBalancer) Models() []ModelInfo {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
 	if len(lb.providers) == 0 {
 		return nil
 	}
@@ -387,6 +393,8 @@ func (lb *LoadBalancer) Models() []ModelInfo {
 
 // Capabilities 实现 Provider 接口的 Capabilities 方法
 func (lb *LoadBalancer) Capabilities() Capabilities {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
 	if len(lb.providers) == 0 {
 		return Capabilities{}
 	}
@@ -395,6 +403,8 @@ func (lb *LoadBalancer) Capabilities() Capabilities {
 
 // Cost 实现 Provider 接口的 Cost 方法
 func (lb *LoadBalancer) Cost(modelID string, usage Usage) Cost {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
 	if len(lb.providers) == 0 {
 		return Cost{}
 	}

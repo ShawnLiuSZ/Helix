@@ -102,7 +102,9 @@ func (m *OAuthManager) refreshToken(ctx context.Context, refreshToken string) (*
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	// 用带超时的 client，避免 token endpoint 挂起导致 agent 卡死（N9）
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}

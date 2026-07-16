@@ -45,6 +45,10 @@ func GenerateJSONSchema() string {
 							"description": "Provider API 基础 URL",
 							"format":      "uri",
 						},
+						"api_key": map[string]interface{}{
+							"type":        "string",
+							"description": "直接填写 API Key（明文，优先级高于 api_key_env）",
+						},
 						"api_key_env": map[string]interface{}{
 							"type":        "string",
 							"description": "存放 API Key 的环境变量名",
