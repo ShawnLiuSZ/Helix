@@ -254,7 +254,9 @@ LOOMCODE_TOKENIZER_PATH=/path/to/tokenizer.json loomcode --provider deepseek
 
 ### API Key
 
-配置文件中使用 `${ENV_VAR}` 语法引用环境变量（推荐）：
+`api_key` 字段支持两种格式：
+
+**方式一：`${ENV_VAR}` 引用环境变量（推荐）**
 
 ```json
 {
@@ -271,7 +273,20 @@ LOOMCODE_TOKENIZER_PATH=/path/to/tokenizer.json loomcode --provider deepseek
 1. `loomcode.json` 的 `env` 字段
 2. 系统环境变量
 
-> 安全建议：避免把密钥明文写入配置文件。使用 `${ENV_VAR}` 语法，密钥存储在环境变量中。
+**方式二：明文密钥（适合测试/本地开发）**
+
+```json
+{
+  "providers": [
+    {
+      "name": "deepseek",
+      "api_key": "sk-xxxxxxxxxxxxxxxx"
+    }
+  ]
+}
+```
+
+> 安全建议：生产环境使用 `${ENV_VAR}`，避免密钥明文入库。
 
 **已弃用：`api_key_env` 字段**
 
