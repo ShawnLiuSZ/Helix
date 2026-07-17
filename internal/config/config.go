@@ -218,22 +218,23 @@ func expandEnvVar(value string, envMaps ...map[string]string) string {
 }
 
 // resolveAPIKeys 检查各 Provider 的 API Key 是否已配置。
-// 支持 ${ENV_VAR} 语法直接展开环境变量。
-// 优先级：api_key(${...}展开) > api_key_env(project env > global env > system env)
+// 支持 ${ENV_VAR} 语法直接展开环境变量（推荐方式）。
+// 优先级：api_key(${...}展开) > api_key_env(已弃用，仅向后兼容)
 func (c *Config) resolveAPIKeys(projectEnv, globalEnv map[string]string) error {
 	for i := range c.Providers {
 		p := &c.Providers[i]
 
-		// 1. 如果 api_key 包含 ${ENV_VAR}，展开它
+		// 1. 如果 api_key 包含 ${ENV_VAR}，展开它（推荐方式）
 		if p.APIKey != "" {
 			p.APIKey = expandEnvVar(p.APIKey, projectEnv, globalEnv)
 			continue
 		}
 
-		// 2. 通过 api_key_env 查找（向后兼容）
+		// 2. 通过 api_key_env 查找（已弃用，仅向后兼容）
 		if p.APIKeyEnv == "" {
 			continue
 		}
+		fmt.Fprintf(os.Stderr, "Warning: provider %q uses deprecated api_key_env field, please use api_key: \"${%s}\" instead\n", p.Name, p.APIKeyEnv)
 		keyName := p.APIKeyEnv
 
 		// 2a. 项目级 env 配置

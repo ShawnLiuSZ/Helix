@@ -47,11 +47,12 @@ func GenerateJSONSchema() string {
 						},
 						"api_key": map[string]interface{}{
 							"type":        "string",
-							"description": "API Key（明文或 ${ENV_VAR} 引用环境变量）",
+							"description": "API Key（明文或 ${ENV_VAR} 引用环境变量，推荐使用 ${ENV_VAR}）",
 						},
 						"api_key_env": map[string]interface{}{
 							"type":        "string",
-							"description": "存放 API Key 的环境变量名（向后兼容，推荐直接用 api_key: \"${ENV_VAR}\"）",
+							"description": "[已弃用] 请改用 api_key: \"${ENV_VAR}\"",
+							"deprecated":  true,
 						},
 						"auth_method": map[string]interface{}{
 							"type":        "string",
