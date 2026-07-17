@@ -146,7 +146,7 @@ loomcode setup
       "display_name": "DeepSeek",
       "kind": "deepseek",
       "base_url": "https://api.deepseek.com",
-      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_key": "${DEEPSEEK_API_KEY}",
       "default_model": "deepseek-v4-flash",
       "models": [
         {
@@ -197,7 +197,7 @@ MiMo 当前仅支持 API Key 接入（OAuth 暂未实现），提供两种接入
       "name": "mimo",
       "kind": "mimo",
       "base_url": "https://api.xiaomimimo.com/v1",
-      "api_key_env": "MIMO_API_KEY",
+      "api_key": "${MIMO_API_KEY}",
       "default_model": "mimo-v2.5-pro"
     }
   ]
@@ -213,7 +213,7 @@ Token Plan 示例：
       "name": "mimo-token-plan",
       "kind": "mimo",
       "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
-      "api_key_env": "MIMO_TOKEN_PLAN_KEY",
+      "api_key": "${MIMO_TOKEN_PLAN_KEY}",
       "default_model": "mimo-v2.5-pro"
     }
   ]
@@ -254,7 +254,35 @@ LOOMCODE_TOKENIZER_PATH=/path/to/tokenizer.json loomcode --provider deepseek
 
 ### API Key
 
-配置文件中 `api_key_env` 指定环境变量名，实际密钥从 `.env` 或系统环境变量读取。也可以直接写 `api_key`（优先级高于 `api_key_env`）：
+配置文件中支持两种方式引用 API Key：
+
+**方式一：`${ENV_VAR}` 引用环境变量（推荐）**
+
+```json
+{
+  "providers": [
+    {
+      "name": "deepseek",
+      "api_key": "${DEEPSEEK_API_KEY}"
+    }
+  ]
+}
+```
+
+**方式二：`api_key_env` 指定环境变量名（向后兼容）**
+
+```json
+{
+  "providers": [
+    {
+      "name": "deepseek",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
+  ]
+}
+```
+
+**方式三：直接写明文（不推荐，仅用于测试）**
 
 ```json
 {
@@ -267,7 +295,7 @@ LOOMCODE_TOKENIZER_PATH=/path/to/tokenizer.json loomcode --provider deepseek
 }
 ```
 
-> 安全建议：优先使用 `api_key_env` + `.env`，避免把密钥明文写入配置文件。
+> 安全建议：优先使用 `${ENV_VAR}` 或 `api_key_env`，避免把密钥明文写入配置文件。
 
 ```bash
 # ~/.loomcode/.env 或 ./.env
@@ -477,7 +505,7 @@ Agent 在执行任务时可调用以下工具访问历史会话：
       "display_name": "DeepSeek",
       "kind": "deepseek",
       "base_url": "https://api.deepseek.com",
-      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_key": "${DEEPSEEK_API_KEY}",
       "default_model": "deepseek-v4-flash",
       "models": [
         {
@@ -525,6 +553,8 @@ DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
 MIMO_API_KEY=
 OPENAI_API_KEY=
 ```
+
+> 提示：使用 `api_key: "${ENV_VAR}"` 语法时，环境变量会自动从系统环境变量和 `loomcode.json` 的 `env` 字段中解析，无需手动加载 `.env` 文件。
 
 ---
 
