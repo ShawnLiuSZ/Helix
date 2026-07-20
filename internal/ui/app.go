@@ -157,11 +157,11 @@ type App struct {
 }
 
 type chatMessage struct {
-	Role              string
-	Content           string
-	ReasoningContent  string // 模型的思考过程（流式片段聚合）
-	ToolName          string
-	Timestamp         time.Time
+	Role             string
+	Content          string
+	ReasoningContent string // 模型的思考过程（流式片段聚合）
+	ToolName         string
+	Timestamp        time.Time
 }
 
 // modelPickerEntry 模型选择器条目（包含 provider 信息）
@@ -220,19 +220,20 @@ var allCommands = []string{
 // lipgloss.HasDarkBackground() 自动选色：深色端维持原 ANSI 观感，
 // 浅色端采用符合 WCAG AA 对比度的 hex 值。
 var (
-	colorUser       = lipgloss.AdaptiveColor{Light: "#0891b2", Dark: "6"}  // cyan
-	colorAssistant  = lipgloss.AdaptiveColor{Light: "#d97706", Dark: "3"}  // amber
-	colorSystem     = lipgloss.AdaptiveColor{Light: "#6b7280", Dark: "8"}  // gray
-	colorTool       = lipgloss.AdaptiveColor{Light: "#9333ea", Dark: "5"}  // purple
-	colorDanger     = lipgloss.AdaptiveColor{Light: "#dc2626", Dark: "1"}  // red
-	colorSuccess    = lipgloss.AdaptiveColor{Light: "#059669", Dark: "2"}  // emerald
-	colorInfo       = lipgloss.AdaptiveColor{Light: "#2563eb", Dark: "4"}  // blue
-	colorHighlight  = lipgloss.AdaptiveColor{Light: "#0891b2", Dark: "6"}  // cyan
-	colorSuggestion = lipgloss.AdaptiveColor{Light: "#6b7280", Dark: "8"}  // gray
-	colorMuted      = lipgloss.AdaptiveColor{Light: "#6b7280", Dark: "7"}  // gray/white
-	colorBg         = lipgloss.AdaptiveColor{Light: "#1f2937", Dark: "7"}  // 光标背景
-	colorFg         = lipgloss.AdaptiveColor{Light: "#1f2937", Dark: "0"}  // 状态栏文字
-	colorCursorFg   = lipgloss.AdaptiveColor{Light: "#f9fafb", Dark: "0"}  // 光标块内文字
+	colorUser       = lipgloss.AdaptiveColor{Light: "#0891b2", Dark: "6"} // cyan
+	colorAssistant  = lipgloss.AdaptiveColor{Light: "#d97706", Dark: "3"} // amber
+	colorSystem     = lipgloss.AdaptiveColor{Light: "#6b7280", Dark: "8"} // gray
+	colorTool       = lipgloss.AdaptiveColor{Light: "#9333ea", Dark: "5"} // purple
+	colorDanger     = lipgloss.AdaptiveColor{Light: "#dc2626", Dark: "1"} // red
+	colorSuccess    = lipgloss.AdaptiveColor{Light: "#059669", Dark: "2"} // emerald
+	colorInfo       = lipgloss.AdaptiveColor{Light: "#2563eb", Dark: "4"} // blue
+	colorHighlight  = lipgloss.AdaptiveColor{Light: "#0891b2", Dark: "6"} // cyan
+	colorSuggestion = lipgloss.AdaptiveColor{Light: "#6b7280", Dark: "8"} // gray
+	colorMuted      = lipgloss.AdaptiveColor{Light: "#6b7280", Dark: "7"} // gray/white
+	colorBg         = lipgloss.AdaptiveColor{Light: "#1f2937", Dark: "7"} // 光标背景
+	colorFg         = lipgloss.AdaptiveColor{Light: "#1f2937", Dark: "0"} // 状态栏文字
+	colorStatusBg   = lipgloss.AdaptiveColor{Light: "#e5e7eb", Dark: "7"} // 状态栏底（浅色端浅灰条，与白底区分且 WCAG AA 对比度）
+	colorCursorFg   = lipgloss.AdaptiveColor{Light: "#f9fafb", Dark: "0"} // 光标块内文字
 	colorLogo       = lipgloss.AdaptiveColor{Light: "#2563eb", Dark: "#3B82F6"}
 	colorLogoAccent = lipgloss.AdaptiveColor{Light: "#7c3aed", Dark: "#7C3AED"}
 )
@@ -247,7 +248,7 @@ var (
 	suggestionStyle  = lipgloss.NewStyle().Foreground(colorSuggestion)
 	suggestionSel    = lipgloss.NewStyle().Foreground(colorFg).Background(colorInfo)
 	headerStyle      = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Padding(0, 1)
-	statusBarStyle   = lipgloss.NewStyle().Foreground(colorFg).Background(colorMuted).Padding(0, 1)
+	statusBarStyle   = lipgloss.NewStyle().Foreground(colorFg).Background(colorStatusBg).Padding(0, 1)
 	costGreenStyle   = lipgloss.NewStyle().Foreground(colorSuccess)
 	costYellowStyle  = lipgloss.NewStyle().Foreground(colorAssistant)
 	costRedStyle     = lipgloss.NewStyle().Foreground(colorDanger)
@@ -303,6 +304,7 @@ func NewApp(p provider.Provider, tools *tool.Registry) *App {
 	ta.ShowLineNumbers = false
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	// P2-1：聚焦/失焦用前景色区分，让用户能判断输入框焦点状态。
+	// （更醒目的边框焦点指示在 View() 层通过 lipgloss 包裹实现，见 render 区。）
 	ta.FocusedStyle.Base = lipgloss.NewStyle().Foreground(colorFg)
 	ta.BlurredStyle.Base = lipgloss.NewStyle().Foreground(colorMuted)
 	// 修复光标渲染乱码：用 Background 替代 Reverse(true) — 使用注册表样式
@@ -1156,8 +1158,8 @@ Budget:
 
 	case "/clear":
 		a.messages = a.messages[:0]
-		a.savedMsgCount = 0 // 重置已保存计数，否则 saveSession 的 for 循环会因 savedMsgCount > len(messages) 跳过新消息
-		a.activeSess = nil  // 清空活动会话引用，让下次 saveSession 创建新会话（/clear = 开始新对话）
+		a.savedMsgCount = 0         // 重置已保存计数，否则 saveSession 的 for 循环会因 savedMsgCount > len(messages) 跳过新消息
+		a.activeSess = nil          // 清空活动会话引用，让下次 saveSession 创建新会话（/clear = 开始新对话）
 		a.agent.ResetConversation() // 同时清空模型侧对话历史
 		a.viewport.SetContent("")
 		return a, nil
@@ -1636,7 +1638,14 @@ func (a *App) View() string {
 	sepH := 1
 	statusBar := a.renderStatusBar()
 	statusH := lipgloss.Height(statusBar)
-	textareaView := a.textArea.View()
+	rawTextarea := a.textArea.View()
+	// P2-1：View 层包裹边框，聚焦态蓝色、失焦态灰色，清晰区分焦点（浅色/深色均可见）。
+	// 边框始终存在（仅颜色切换），避免聚焦时布局高度跳动。
+	tf := colorMuted
+	if a.textArea.Focused() {
+		tf = colorInfo
+	}
+	textareaView := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(tf).Render(rawTextarea)
 	textareaH := lipgloss.Height(textareaView)
 
 	activityH := 0
