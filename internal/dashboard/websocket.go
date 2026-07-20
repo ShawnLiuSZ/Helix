@@ -82,23 +82,32 @@ func (h *WSHub) run() {
 			log.Printf("WebSocket client disconnected: %d total", total)
 
 		case message := <-h.broadcast:
+			// 先 RLock 遍历发送；缓冲满的 client 收集到 slowClients，
+			// 遍历结束后再 Lock 统一删除。避免在 range 迭代中修改 map 导致部分 client 被跳过漏收。
 			h.mu.RLock()
+			var slowClients []*WSClient
 			for client := range h.clients {
 				select {
 				case client.send <- message:
 				default:
-					// 发送缓冲区满，断开连接
-					h.mu.RUnlock()
-					h.mu.Lock()
+					// 发送缓冲区满，标记待删除
+					slowClients = append(slowClients, client)
+				}
+			}
+			h.mu.RUnlock()
+
+			if len(slowClients) > 0 {
+				h.mu.Lock()
+				for _, client := range slowClients {
 					if _, ok := h.clients[client]; ok {
 						delete(h.clients, client)
 						client.closeSend()
 					}
-					h.mu.Unlock()
-					h.mu.RLock()
 				}
+				total := len(h.clients)
+				h.mu.Unlock()
+				log.Printf("WebSocket dropped %d slow client(s): %d remaining", len(slowClients), total)
 			}
-			h.mu.RUnlock()
 		}
 	}
 }

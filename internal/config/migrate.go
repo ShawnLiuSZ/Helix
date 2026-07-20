@@ -117,8 +117,18 @@ func migrateEnvFile(configDir string) error {
 		config = make(map[string]interface{})
 	}
 
-	// 添加 env 字段
-	config["env"] = envMap
+	// 合并 env 字段：保留 settings.json 已有的 env 配置，.env 仅补充缺失的 key。
+	// 直接 config["env"] = envMap 会覆盖用户手动配置的 env，导致配置丢失。
+	existingEnv, _ := config["env"].(map[string]interface{})
+	if existingEnv == nil {
+		existingEnv = make(map[string]interface{})
+	}
+	for k, v := range envMap {
+		if _, exists := existingEnv[k]; !exists {
+			existingEnv[k] = v
+		}
+	}
+	config["env"] = existingEnv
 
 	// 写入 settings.json
 	jsonData, err := json.MarshalIndent(config, "", "  ")
