@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -629,5 +630,60 @@ func TestResolveAPIKeys_ApiKeyEnv_BackwardCompatible(t *testing.T) {
 
 	if cfg.Providers[0].APIKey != "backup-value" {
 		t.Errorf("expected APIKey to be 'backup-value', got %q", cfg.Providers[0].APIKey)
+	}
+}
+
+// TestUnmarshalJSON_PluginsAndMcpServersMerged #3 修复：plugins 与 mcpServers 共存时始终合并。
+func TestUnmarshalJSON_PluginsAndMcpServersMerged(t *testing.T) {
+	data := []byte(`{
+		"plugins": [
+			{"name": "legacy", "command": "legacy-cmd"}
+		],
+		"mcpServers": {
+			"claude": {"type": "stdio", "command": "claude-cmd"},
+			"unamed": {"type": "sse", "url": "http://localhost:3000"}
+		}
+	}`)
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if len(cfg.Plugins) != 3 {
+		t.Fatalf("expected 3 plugins, got %d: %+v", len(cfg.Plugins), cfg.Plugins)
+	}
+
+	names := make(map[string]PluginConfig)
+	for _, p := range cfg.Plugins {
+		names[p.Name] = p
+	}
+
+	if names["legacy"].Command != "legacy-cmd" {
+		t.Errorf("legacy plugin command = %q, want legacy-cmd", names["legacy"].Command)
+	}
+	if names["claude"].Command != "claude-cmd" {
+		t.Errorf("claude plugin command = %q, want claude-cmd", names["claude"].Command)
+	}
+	if names["unamed"].URL != "http://localhost:3000" {
+		t.Errorf("unamed plugin url = %q, want http://localhost:3000", names["unamed"].URL)
+	}
+}
+
+// TestUnmarshalJSON_McpServersOnly #3 修复：仅 mcpServers 时正确转换为 plugins。
+func TestUnmarshalJSON_McpServersOnly(t *testing.T) {
+	data := []byte(`{
+		"mcpServers": {
+			"test": {"type": "stdio", "command": "test-cmd"}
+		}
+	}`)
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if len(cfg.Plugins) != 1 || cfg.Plugins[0].Name != "test" {
+		t.Errorf("expected plugin 'test', got %+v", cfg.Plugins)
 	}
 }

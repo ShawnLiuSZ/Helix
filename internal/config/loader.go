@@ -101,6 +101,9 @@ func mergeConfigs(global, project *Config) *Config {
 	if project == nil {
 		return global
 	}
+	if global == nil {
+		return project
+	}
 
 	merged := *global // shallow copy
 
