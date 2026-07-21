@@ -31,8 +31,11 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, aux); err != nil {
 		return err
 	}
-	// 将 mcpServers 对象转换为 plugins 数组
-	if len(c.McpServers) > 0 && len(c.Plugins) == 0 {
+	// 将 mcpServers 对象转换为 plugins 数组。
+	// #3 修复：去掉 `&& len(c.Plugins) == 0` 条件，始终合并 mcpServers。
+	// 原逻辑在 plugins 与 mcpServers 共存时静默丢弃 mcpServers，用户混用两类配置时部分插件丢失。
+	// 重名冲突由 Validate 兜底报错（duplicate plugin name）。
+	if len(c.McpServers) > 0 {
 		for name, pc := range c.McpServers {
 			if pc.Name == "" {
 				pc.Name = name
@@ -210,9 +213,11 @@ func LoadDefault() (*Config, error) {
 	return DefaultConfig(), nil
 }
 
-// expandEnvVar expands ${ENV_VAR} references in a string.
-// If the value contains ${...}, it extracts the env var name and resolves it.
-// Returns the expanded value, or the original value if no expansion is needed.
+// expandEnvVar 展开字符串中的 ${ENV_VAR} 引用。
+//
+// #4 修复（注释澄清）：仅支持整串形如 "${NAME}" 的展开，不支持 "sk-${KEY}" 这类内嵌写法。
+// 解析顺序：提供的 envMaps（project > global）→ 系统环境变量。
+// 变量未设置时返回原始字符串（调用方据此判断是否告警，见 resolveAPIKeys）。
 func expandEnvVar(value string, envMaps ...map[string]string) string {
 	if len(value) < 4 || value[:2] != "${" || value[len(value)-1] != '}' {
 		return value
@@ -249,7 +254,15 @@ func (c *Config) resolveAPIKeys(projectEnv, globalEnv map[string]string) error {
 
 		// 1. 如果 api_key 包含 ${ENV_VAR}，展开它（推荐方式）
 		if p.APIKey != "" {
-			p.APIKey = expandEnvVar(p.APIKey, projectEnv, globalEnv)
+			raw := p.APIKey
+			expanded := expandEnvVar(raw, projectEnv, globalEnv)
+			// #2 修复：${VAR} 未设置时 expandEnvVar 原样返回字面量，
+			// 若直接用作 API Key 会到请求时才 401，根因难定位。
+			// 此处告警让用户在启动时即可发现漏配。
+			if expanded == raw && strings.HasPrefix(raw, "${") && strings.HasSuffix(raw, "}") {
+				fmt.Fprintf(os.Stderr, "Warning: provider %q api_key env var %q is not set\n", p.Name, raw[2:len(raw)-1])
+			}
+			p.APIKey = expanded
 			continue
 		}
 
